@@ -1,0 +1,592 @@
+================================================================================
+QUANT RESEARCH TOOLKIT — FEATURES & COMMAND REFERENCE
+================================================================================
+
+Practice / research only. Not investment advice. No real money is traded.
+
+Data source: Yahoo Finance (free, typically ~15 minutes delayed).
+Default transaction cost assumption: 0.05% (5 bps) per trade.
+
+Entry point:
+  python3 cli.py <command> [options]
+
+Alternate entry point (same CLI):
+  python3 paper_trader.py <command> [options]
+
+
+================================================================================
+1. OVERVIEW
+================================================================================
+
+This project is a Python quant research toolkit with:
+
+  • Single-asset models     — analyze one ticker at a time
+  • Cross-sectional model   — rank a basket of stocks and build long/short books
+  • Combined decision layer — merge cross-sectional selection with single-stock timing
+  • Paper trading           — simulate buys/sells in a local JSON portfolio
+  • Backtesting             — historical performance with metrics and explanations
+  • Universe presets        — named stock baskets for cleaner cross-sectional research
+
+Typical workflow:
+
+  1. List models or universes
+  2. Run signal / ranks to see current recommendations
+  3. Backtest strategies over history
+  4. Optionally paper-trade with `run`, `buy`, `sell`
+
+
+================================================================================
+2. INSTALLATION
+================================================================================
+
+Requirements (see requirements.txt):
+
+  numpy>=1.24
+  pandas>=2.0
+  yfinance>=0.2.40
+  matplotlib>=3.7
+
+Install:
+
+  pip install -r requirements.txt
+
+Run from the project root directory (where cli.py lives).
+
+
+================================================================================
+3. PROJECT STRUCTURE
+================================================================================
+
+cli.py                          Main command-line interface
+paper_trader.py                 Thin wrapper → cli.py
+
+quant/
+  data.py                       Yahoo Finance data fetching
+  metrics.py                    Performance metrics (Sharpe, drawdown, etc.)
+  reporting.py                  Backtest report printing
+  report_builder.py             Full text report generator
+  portfolio.py                  Paper portfolio JSON persistence
+  registry.py                   Model registry
+  universes.py                  Named universe presets + helpers
+  combined_signal.py            XS + MR + momentum decision layer
+  universe_analysis.py          Per-stock snapshots and backtests in a panel
+  models/
+    base.py                     Single-asset model interface
+    panel_base.py               Multi-asset model interface
+    mean_reversion.py           Z-score mean reversion
+    momentum.py                 Time-series momentum (vol-targeted)
+    cross_sectional.py          Cross-sectional long/short ranking
+
+Standalone educational demos (synthetic data, optional plots):
+
+  quant_backtest.py             Mean reversion on simulated prices
+  momentum_model.py             Momentum on simulated prices
+  cross_sectional_model.py      Cross-sectional L/S on simulated panel
+
+Default paper portfolio file:
+  paper_portfolio.json          Created/updated automatically ($100,000 start)
+
+
+================================================================================
+4. MODELS
+================================================================================
+
+--------------------------------------------------------------------------------
+4.1 Mean Reversion (single-asset)
+--------------------------------------------------------------------------------
+
+Slug: mean-reversion
+
+Logic:
+  • Compute rolling mean and std over a window (default 20 days)
+  • Z-score = (price - mean) / std
+  • BUY when z < entry threshold (default -1.0, oversold)
+  • SELL when z >= exit threshold (default 0.0, back to mean)
+
+Default parameters:
+  --window 20        Rolling window (days)
+  --entry-z -1.0     Enter when z below this
+  --exit-z 0.0       Exit when z at or above this
+
+Best for: single-stock timing around short-term dislocations.
+
+
+--------------------------------------------------------------------------------
+4.2 Momentum (single-asset, time-series)
+--------------------------------------------------------------------------------
+
+Slug: momentum
+
+Logic:
+  • Signal = past return from (t - skip - lookback) to (t - skip)
+  • Default: 126-day lookback, 21-day skip (12-1 style on daily bars)
+  • Long when signal > 0 (default long-only)
+  • Position size scaled inversely to realized volatility (vol targeting)
+
+Default parameters:
+  --lookback 126         Signal lookback window
+  --skip 21              Skip recent days in signal
+  --vol-window 63        Realized vol rolling window
+  --target-vol 0.15      Annual vol target (15%)
+  --max-leverage 3.0     Max position weight
+  --no-vol-scale         Disable vol targeting
+  --short                Allow short positions (long/short mode)
+
+Best for: riding medium-term trends in a single name with risk-aware sizing.
+
+
+--------------------------------------------------------------------------------
+4.3 Cross-Sectional (multi-asset panel)
+--------------------------------------------------------------------------------
+
+Slug: cross-sectional
+
+Logic:
+  • Rank all stocks in the selected universe at each rebalance
+  • Momentum mode: long recent winners, short recent losers
+  • Reversal mode: long recent short-term losers, short winners
+  • Top fraction → equal-weight long leg; bottom fraction → equal-weight short leg
+  • Dollar-neutral long/short book by default
+
+Default parameters:
+  --signal momentum       momentum | reversal | all | combo
+  --universe semis        Named preset (see section 5)
+  --tickers A,B,C         Custom comma-separated list (overrides --universe)
+  --top-frac 0.25         Fraction long and short per leg (25% each)
+  --rebalance 5           Rebalance every N trading days
+  --lookback 126          Momentum signal lookback
+  --skip 21               Momentum signal skip
+  --short-window 5        Reversal signal lookback
+
+Important:
+  Cross-sectional ranks are RELATIVE within the chosen universe.
+  A stock can have positive momentum on its own but still be shorted if it
+  ranks near the bottom of the selected basket. Universe definition is part
+  of the model.
+
+
+--------------------------------------------------------------------------------
+4.4 Combined Decision Layer
+--------------------------------------------------------------------------------
+
+Merges cross-sectional leg with single-stock mean reversion and momentum.
+
+Final actions (long-only mode, default):
+  BUY              XS long + momentum confirmed + not overextended
+  WAIT             Conditions not met, or stretched price
+  AVOID            XS short leg — avoid for long-only portfolio
+  WATCH            Conflict: relatively weak but individually oversold
+  SHORT_CANDIDATE  Research label (only with --allow-short-candidates)
+
+Combined parameters (portfolio commands):
+  --z-overextended 1.5           Z above this → WAIT on long candidates
+  --z-oversold -1.0              Oversold bounce zone threshold
+  --no-require-momentum-buy      Do not require momentum BUY for entries
+  --allow-short-candidates       Label SHORT_CANDIDATE on weak names
+  --no-long-only                 Disable long-only interpretation of short leg
+
+Strategy comparison (`portfolio compare`) backtests four approaches:
+  1. Equal-weight benchmark
+  2. XS momentum long-only
+  3. XS momentum long/short
+  4. Combined signal long-only
+
+
+================================================================================
+5. UNIVERSE PRESETS
+================================================================================
+
+Cross-sectional commands use named universes so each backtest answers a clear
+question. List all presets:
+
+  python3 cli.py portfolio universes
+
+Available presets:
+
+  semis (13)
+    MU, NVDA, AMD, AVGO, QCOM, TSM, ASX, AMAT, LRCX, KLAC, INTC, ASML, MRVL
+    → Which semiconductor names are strongest relative to other semis?
+
+  semi_equipment (4)
+    AMAT, LRCX, KLAC, ASML
+    → Which semi equipment names lead vs other equipment peers?
+
+  mega_cap_tech (8)
+    AAPL, MSFT, GOOGL, AMZN, META, NVDA, AVGO, TSLA
+    → Which mega-cap tech names are strongest vs other mega-cap tech?
+
+  ai_infra (13)
+    NVDA, AMD, AVGO, MU, MRVL, TSM, ASML, AMAT, LRCX, KLAC, MSFT, GOOGL, AMZN
+    → Which AI infrastructure names lead vs the AI infra basket?
+
+  broad_tech (17)
+    AAPL, MSFT, GOOGL, AMZN, META, NVDA, AMD, AVGO, QCOM, TSM, ASML, AMAT,
+    LRCX, KLAC, MU, MRVL, INTC
+    → Which broad tech names rank highest in a diversified tech basket?
+
+  asx_large_caps (8)
+    BHP.AX, CBA.AX, CSL.AX, WDS.AX, WOW.AX, RIO.AX, WES.AX, MQG.AX
+    → Which ASX large caps lead vs other ASX large caps?
+
+Default preset: semis
+
+Custom tickers (overrides preset):
+  --tickers MU,NVDA,AMD,AVGO,TSM,ASML
+
+Rules:
+  • Spaces are stripped; Yahoo suffixes like .AX are preserved
+  • Tickers are deduplicated while preserving order
+  • Universe must have enough names for long + short legs:
+      len(tickers) >= 2 * k, where k = round(top_frac * len(tickers))
+  • If too few names, add tickers or lower --top-frac
+
+Note: "ASX" in the semis preset is ASE Technology (NYSE: ASX), not the
+Australian exchange. Australian stocks use the .AX suffix.
+
+
+================================================================================
+6. CLI COMMANDS — GENERAL
+================================================================================
+
+Show built-in help:
+  python3 cli.py help
+  python3 cli.py --help
+
+List all models:
+  python3 cli.py models list
+
+
+================================================================================
+7. CLI COMMANDS — SINGLE-ASSET ANALYSIS
+================================================================================
+
+--------------------------------------------------------------------------------
+7.1 signal — current model reading for one ticker
+--------------------------------------------------------------------------------
+
+  python3 cli.py signal TICKER [--model MODEL] [strategy params] [--no-math]
+
+Examples:
+  python3 cli.py signal NVDA --model mean-reversion
+  python3 cli.py signal MU --model momentum
+  python3 cli.py signal AAPL --model momentum --lookback 63 --skip 10
+
+Shows live price, indicators, and recommended action (BUY / SELL / HOLD / WAIT).
+Add --no-math to skip the explanatory math block.
+
+
+--------------------------------------------------------------------------------
+7.2 backtest — historical performance for one ticker
+--------------------------------------------------------------------------------
+
+  python3 cli.py backtest TICKER [--model MODEL] [--years N] [--no-explain]
+
+Examples:
+  python3 cli.py backtest NVDA --model all --years 5
+  python3 cli.py backtest MU --model mean-reversion --years 3
+  python3 cli.py backtest AAPL --model momentum --short
+
+Default model for backtest: all (runs both mean-reversion and momentum).
+
+Output includes annual return, volatility, Sharpe ratio, max drawdown,
+trade count, win rate, and buy-and-hold benchmark comparison.
+
+
+--------------------------------------------------------------------------------
+7.3 report — full text report (signals + backtests)
+--------------------------------------------------------------------------------
+
+  python3 cli.py report TICKER [--model MODEL] [--years N] [--save PATH]
+
+Examples:
+  python3 cli.py report MU --years 5
+  python3 cli.py report NVDA --model momentum --save reports/NVDA_report.txt
+
+Generates a complete analysis report with live signals, backtest summaries,
+model comparison, and optional math explanations.
+
+
+================================================================================
+8. CLI COMMANDS — PAPER TRADING
+================================================================================
+
+Paper portfolio defaults:
+  • Starting cash: $100,000
+  • Portfolio file: paper_portfolio.json (override with --portfolio PATH)
+
+--------------------------------------------------------------------------------
+8.1 run — apply model rules and trade automatically
+--------------------------------------------------------------------------------
+
+  python3 cli.py run TICKER --model MODEL [strategy params]
+
+Examples:
+  python3 cli.py run MU --model mean-reversion
+  python3 cli.py run NVDA --model momentum
+
+Reads the latest signal and executes a paper BUY or SELL if conditions are met.
+Updates model state in the portfolio JSON.
+
+
+--------------------------------------------------------------------------------
+8.2 buy / sell — manual paper trades
+--------------------------------------------------------------------------------
+
+  python3 cli.py buy TICKER
+  python3 cli.py sell TICKER
+
+Examples:
+  python3 cli.py buy NVDA
+  python3 cli.py sell MU
+
+Uses live Yahoo quote. Buys invest available cash (fractional shares allowed).
+
+
+--------------------------------------------------------------------------------
+8.3 status / history / reset
+--------------------------------------------------------------------------------
+
+  python3 cli.py status
+  python3 cli.py history [--limit N]
+  python3 cli.py reset
+
+Examples:
+  python3 cli.py status
+  python3 cli.py history --limit 50
+  python3 cli.py reset
+
+status  — cash, positions, live P&L, total equity
+history — recent trade log
+reset   — restore portfolio to $100,000 cash, clear positions and trades
+
+
+--------------------------------------------------------------------------------
+8.4 watch — poll signal on an interval
+--------------------------------------------------------------------------------
+
+  python3 cli.py watch TICKER --model MODEL [--interval SECONDS]
+
+Examples:
+  python3 cli.py watch MU --model mean-reversion --interval 300
+
+Refreshes signal every 300 seconds (default). Ctrl+C to stop.
+
+
+================================================================================
+9. CLI COMMANDS — CROSS-SECTIONAL PORTFOLIO
+================================================================================
+
+--------------------------------------------------------------------------------
+9.1 portfolio universes — list named presets
+--------------------------------------------------------------------------------
+
+  python3 cli.py portfolio universes
+
+Shows each preset with ticker count, full list, and a short description.
+
+
+--------------------------------------------------------------------------------
+9.2 portfolio ranks — current long/short targets
+--------------------------------------------------------------------------------
+
+  python3 cli.py portfolio ranks [options]
+
+Options:
+  --signal momentum|reversal     (required: not "all" or "combo")
+  --universe PRESET              default: semis
+  --tickers T1,T2,...            custom list (overrides --universe)
+  --years N                      history to fetch (default 5)
+  --top-frac F                   long/short fraction (default 0.25)
+  --rebalance N                  rebalance interval (default 5)
+  --no-single-stock              skip per-stock MR/momentum table
+  --no-math                      skip math explanation
+  Combined params: --z-overextended, --z-oversold, etc.
+
+Examples:
+  python3 cli.py portfolio ranks --signal momentum
+  python3 cli.py portfolio ranks --signal momentum --universe semis
+  python3 cli.py portfolio ranks --signal momentum --universe mega_cap_tech
+  python3 cli.py portfolio ranks --signal reversal --universe ai_infra
+  python3 cli.py portfolio ranks --tickers MU,NVDA,AMD,AVGO,TSM,ASML
+
+Output shows:
+  • Universe preset name and ticker list
+  • Long leg with weights and scores
+  • Short leg with weights and scores
+  • Combined single-stock snapshot table (unless --no-single-stock)
+
+
+--------------------------------------------------------------------------------
+9.3 portfolio backtest — historical cross-sectional performance
+--------------------------------------------------------------------------------
+
+  python3 cli.py portfolio backtest [options]
+
+Options:
+  --signal momentum|reversal|all|combo   default: momentum
+  --universe PRESET                      default: semis
+  --tickers T1,T2,...                    custom list
+  --years N                              default: 5
+  --top-frac, --rebalance, --lookback, --skip, --short-window
+  --no-explain                           skip explanation text
+  --no-single-stock                      skip per-stock analysis
+  --compare                              run full strategy comparison instead
+
+Examples:
+  python3 cli.py portfolio backtest --signal momentum --years 5
+  python3 cli.py portfolio backtest --signal all --years 5 --universe semis
+  python3 cli.py portfolio backtest --signal reversal --universe mega_cap_tech
+  python3 cli.py portfolio backtest --signal combo --universe ai_infra
+  python3 cli.py portfolio backtest --compare --years 5 --universe semis
+
+Signal modes:
+  momentum  — cross-sectional momentum only
+  reversal  — cross-sectional reversal only
+  all       — run both and compare
+  combo     — 50/50 blend of momentum and reversal legs
+  --compare — shortcut to strategy comparison (see 9.4)
+
+
+--------------------------------------------------------------------------------
+9.4 portfolio compare — four-strategy comparison
+--------------------------------------------------------------------------------
+
+  python3 cli.py portfolio compare [options]
+
+Examples:
+  python3 cli.py portfolio compare --years 5
+  python3 cli.py portfolio compare --years 5 --universe ai_infra
+  python3 cli.py portfolio compare --universe mega_cap_tech --top-frac 0.2
+
+Compares:
+  1. Equal-weight benchmark
+  2. XS momentum long-only
+  3. XS momentum long/short
+  4. Combined signal long-only
+
+Also prints per-stock combined signal snapshot and universe description.
+
+
+================================================================================
+10. STANDALONE DEMO SCRIPTS (SYNTHETIC DATA)
+================================================================================
+
+These run without Yahoo Finance and use simulated price data. Useful for
+learning how the math works offline.
+
+Mean reversion demo:
+  python3 quant_backtest.py
+
+Momentum demo:
+  python3 momentum_model.py
+
+Cross-sectional demo (accepts --universe):
+  python3 cross_sectional_model.py
+  python3 cross_sectional_model.py --universe mega_cap_tech
+
+The cross-sectional demo saves portfolio_curves.png in the project root.
+
+
+================================================================================
+11. COMMON OPTIONS REFERENCE
+================================================================================
+
+Shared across many commands:
+
+  --portfolio PATH       Paper portfolio JSON file (default: paper_portfolio.json)
+  --years N              Years of history to fetch (default: 5)
+  --no-explain           Skip explanatory text in backtest output
+  --no-math              Skip math explanation blocks
+
+Mean-reversion tuning:
+  --window 20 --entry-z -1.0 --exit-z 0.0
+
+Momentum tuning:
+  --lookback 126 --skip 21 --vol-window 63 --target-vol 0.15
+  --max-leverage 3.0 --no-vol-scale --short
+
+Portfolio / cross-sectional tuning:
+  --universe semis --tickers A,B,C --signal momentum
+  --top-frac 0.25 --rebalance 5 --short-window 5
+
+
+================================================================================
+12. METRICS & REPORTING
+================================================================================
+
+Backtests report:
+  • Annualized return
+  • Annualized volatility
+  • Sharpe ratio (assuming 0% risk-free rate)
+  • Maximum drawdown
+  • Number of trades / rebalances
+  • Win rate (where applicable)
+  • Correlation to benchmark (buy-and-hold or equal-weight universe)
+
+Reports include plain-language explanations of how each strategy works and
+why results may differ from buy-and-hold.
+
+
+================================================================================
+13. TICKER FORMATS
+================================================================================
+
+  US stocks:     NVDA, MU, AAPL
+  ASX (Australia): BHP.AX, CBA.AX  (Yahoo Finance suffix)
+
+Invalid or delisted tickers will raise an error when fetching data.
+
+
+================================================================================
+14. QUICK START EXAMPLES
+================================================================================
+
+# Explore what's available
+python3 cli.py models list
+python3 cli.py portfolio universes
+
+# Single-stock research
+python3 cli.py signal MU --model momentum
+python3 cli.py backtest NVDA --model all --years 5
+python3 cli.py report AAPL --save reports/AAPL_report.txt
+
+# Cross-sectional research (default semiconductor universe)
+python3 cli.py portfolio ranks --signal momentum
+python3 cli.py portfolio backtest --signal all --years 5
+
+# Cross-sectional with a specific question
+python3 cli.py portfolio ranks --signal momentum --universe mega_cap_tech
+python3 cli.py portfolio compare --years 5 --universe ai_infra
+python3 cli.py portfolio ranks --tickers MU,NVDA,AMD,AVGO,TSM,ASML
+
+# Paper trading
+python3 cli.py run MU --model mean-reversion
+python3 cli.py buy NVDA
+python3 cli.py status
+python3 cli.py history
+
+
+================================================================================
+15. TROUBLESHOOTING
+================================================================================
+
+Unknown universe:
+  Error lists available preset names. Run `portfolio universes` to see details.
+
+Not enough tickers for long/short:
+  Add more names with --tickers or lower --top-frac.
+  Example: semi_equipment has 4 names — works at top_frac=0.25 (k=1).
+
+Insufficient history:
+  Momentum needs ~240+ trading days. Use --years 5 or longer history.
+
+Yahoo Finance errors:
+  Check ticker symbol, network connection, and rate limits. Retry after a pause.
+
+Python version:
+  Code uses modern type hints; Python 3.9+ recommended.
+
+
+================================================================================
+END OF DOCUMENT
+================================================================================

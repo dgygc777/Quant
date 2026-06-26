@@ -4,11 +4,10 @@ import numpy as np
 import pandas as pd
 
 from quant.models.panel_base import PanelModel
+from quant.universes import DEFAULT_UNIVERSE, DEFAULT_PRESET, universe_selection_note
 
-DEFAULT_UNIVERSE = [
-    'MU', 'NVDA', 'AMD', 'AVGO', 'QCOM', 'TSM',
-    'AMAT', 'LRCX', 'KLAC', 'INTC', 'ASML', 'MRVL',
-]
+# Re-export for backward compatibility.
+DEFAULT_TOP_FRAC = 0.25
 
 
 def simulate_panel(tickers, n_days=1500, seed=1, annual_idvol=0.25,
@@ -34,6 +33,14 @@ def simulate_panel(tickers, n_days=1500, seed=1, annual_idvol=0.25,
 
 def compute_scores(prices: pd.DataFrame, mode: str = 'momentum',
                    lookback: int = 126, skip: int = 21, short_window: int = 5) -> pd.DataFrame:
+    """Cross-sectional score per name.
+
+    Momentum:
+        score[t, i] = price[t-skip, i] / price[t-skip-lookback, i] - 1
+
+    Reversal:
+        score[t, i] = -(price[t, i] / price[t-short_window, i] - 1)
+    """
     if mode == 'momentum':
         return prices.shift(skip) / prices.shift(skip + lookback) - 1.0
     if mode == 'reversal':
@@ -43,7 +50,14 @@ def compute_scores(prices: pd.DataFrame, mode: str = 'momentum',
 
 def build_weights(prices: pd.DataFrame, scores: pd.DataFrame, top_frac: float = 0.33,
                   rebalance: int = 5, market_neutral: bool = True) -> pd.DataFrame:
-    """Daily target weights with periodic rebalance and hold-between logic."""
+    """Build daily target weights with periodic rebalance.
+
+    Top k names receive +1/k (long leg).
+    Bottom k receive -1/k if market_neutral (short leg); else 0.
+    Middle names receive 0.
+
+    Weights decided at close t are held until the next rebalance.
+    """
     n = prices.shape[1]
     k = max(1, int(round(top_frac * n)))
     rebal_days = set(range(0, len(prices), rebalance))
@@ -63,23 +77,44 @@ def build_weights(prices: pd.DataFrame, scores: pd.DataFrame, top_frac: float = 
     return weights
 
 
-def backtest_xs(prices: pd.DataFrame, mode: str = 'momentum', top_frac: float = 0.33,
-                rebalance: int = 5, cost: float = 0.0005, market_neutral: bool = True,
-                **sig_kw) -> pd.DataFrame:
-    rets = prices.pct_change()
-    scores = compute_scores(prices, mode=mode, **sig_kw)
-    weights = build_weights(prices, scores, top_frac, rebalance, market_neutral)
+def portfolio_returns(weights: pd.DataFrame, rets: pd.DataFrame,
+                      cost: float = 0.0005) -> pd.DataFrame:
+    """Compute portfolio returns with no look-ahead and aligned transaction costs.
 
+    Execution assumption
+    --------------------
+    Signal and weights are set at the close of day t.
+    The new position becomes active on day t+1.
+
+        portfolio_return[t] = sum_i weights[t-1, i] * returns[t, i]
+        turnover[t]         = sum_i abs(weights[t, i] - weights[t-1, i])
+        gross_return[t]     = sum_i weights[t-1, i] * returns[t, i]
+        net_return[t]       = gross_return[t] - turnover[t] * cost
+
+    Costs are charged on day t when the position from the prior weight change
+    becomes active (turnover[t] paired with gross_return[t]).
+    """
     port_gross = (weights.shift(1) * rets).sum(axis=1)
     turnover = weights.diff().abs().sum(axis=1).fillna(0.0)
     port_net = port_gross - turnover * cost
     bench = rets.mean(axis=1)
-    n_rebalances = int((weights.diff().abs().sum(axis=1) > 1e-9).sum())
     return pd.DataFrame({
         'strat_net': port_net,
         'ret': bench,
-        'weights': [weights.iloc[i] for i in range(len(weights))],
-    }).dropna(), n_rebalances
+        'turnover': turnover,
+        'gross': port_gross,
+    }).dropna()
+
+
+def backtest_xs(prices: pd.DataFrame, mode: str = 'momentum', top_frac: float = 0.33,
+                rebalance: int = 5, cost: float = 0.0005, market_neutral: bool = True,
+                **sig_kw) -> pd.DataFrame:
+    rets = prices.pct_change(fill_method=None)
+    scores = compute_scores(prices, mode=mode, **sig_kw)
+    weights = build_weights(prices, scores, top_frac, rebalance, market_neutral)
+    result = portfolio_returns(weights, rets, cost)
+    n_rebalances = int((weights.diff().abs().sum(axis=1) > 1e-9).sum())
+    return result, n_rebalances
 
 
 class CrossSectionalModel(PanelModel):
@@ -98,7 +133,7 @@ class CrossSectionalModel(PanelModel):
             'lookback': 126,
             'skip': 21,
             'short_window': 5,
-            'top_frac': 0.33,
+            'top_frac': DEFAULT_TOP_FRAC,
             'rebalance': 5,
             'market_neutral': True,
         }
@@ -125,7 +160,7 @@ class CrossSectionalModel(PanelModel):
             market_neutral=p['market_neutral'],
             **self._sig_params(p),
         )
-        return df.drop(columns=['weights'], errors='ignore'), n_rebal
+        return df.dropna(), n_rebal
 
     def backtest_combo(self, panel: pd.DataFrame, cost: float = 0.0005,
                        **params) -> pd.DataFrame:
@@ -197,12 +232,14 @@ Benchmark: equal-weight return of the full universe.
 """
 
     def format_ranks(self, weights: pd.Series, scores: pd.Series,
-                     universe: list[str], **params) -> str:
+                     universe: list[str], preset_name: str = DEFAULT_PRESET,
+                     **params) -> str:
         p = {**self.default_params(), **params}
         longs = weights[weights > 0].sort_values(ascending=False)
         shorts = weights[weights < 0].sort_values()
         lines = [
             f'=== Cross-Sectional Book ({p["mode"]}) ===',
+            f'Universe preset: {preset_name}',
             f'Universe ({len(universe)}): {", ".join(universe)}',
             f'Rebalance every: {p["rebalance"]} days  |  Top/bottom frac: {p["top_frac"]:.0%}',
             '',
@@ -215,4 +252,6 @@ Benchmark: equal-weight return of the full universe.
         for tk, wt in shorts.items():
             sc = scores.get(tk, float('nan'))
             lines.append(f'  {tk:<6} weight {wt:+.2%}   score {sc:+.1%}')
+        lines.append('')
+        lines.append(universe_selection_note())
         return '\n'.join(lines)

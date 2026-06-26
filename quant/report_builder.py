@@ -25,8 +25,11 @@ CLI quick reference
   python cli.py reset
 
   # Cross-sectional long/short (multi-stock universe)
-  python cli.py portfolio backtest --universe MU,NVDA,AMD --signal all --years 5
-  python cli.py portfolio ranks --universe MU,NVDA,AMD,TSM --signal momentum
+  python cli.py portfolio universes
+  python cli.py portfolio ranks --signal momentum --universe semis
+  python cli.py portfolio ranks --universe mega_cap_tech
+  python cli.py portfolio ranks --tickers MU,NVDA,AMD,AVGO,TSM,ASML
+  python cli.py portfolio compare --years 5 --universe ai_infra
 
 Paper trading only. Data from Yahoo Finance (free, ~15 min delayed).
 """

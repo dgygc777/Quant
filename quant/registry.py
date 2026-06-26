@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from quant.models.base import TradingModel
-from quant.models.cross_sectional import CrossSectionalModel, DEFAULT_UNIVERSE
+from quant.models.cross_sectional import CrossSectionalModel
 from quant.models.mean_reversion import MeanReversionModel
 from quant.models.momentum import MomentumModel
 from quant.models.panel_base import PanelModel

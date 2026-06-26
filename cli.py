@@ -12,13 +12,14 @@ import sys
 import time
 from pathlib import Path
 
+import pandas as pd
+
 from quant.data import (
     build_live_frame,
     fetch_daily_prices,
     fetch_historical_prices,
     fetch_live_quote,
     fetch_panel,
-    parse_universe,
 )
 from quant.portfolio import (
     DEFAULT_CASH,
@@ -31,24 +32,49 @@ from quant.portfolio import (
     save_portfolio,
     set_model_state,
 )
-from quant.models.cross_sectional import DEFAULT_UNIVERSE
+from quant.combined_signal import (
+    CombinedParams,
+    build_combined_snapshot_df,
+    print_combined_signal_report,
+    print_strategy_comparison,
+    run_strategy_comparison,
+)
+from quant.models.cross_sectional import DEFAULT_TOP_FRAC
 from quant.registry import get_model, get_panel_model, list_models, list_panel_models, resolve_models
 from quant.report_builder import build_full_report, cli_usage_block
 from quant.reporting import print_model_comparison, run_model_backtest, run_panel_backtest
+from quant.universe_analysis import (
+    analyze_universe_backtests,
+    print_backtest_table,
+)
+from quant.universes import (
+    DEFAULT_PRESET,
+    describe_preset,
+    format_universes_listing,
+    resolve_universe,
+    validate_universe_size,
+)
 
-DEFAULT_UNIVERSE_STR = ','.join(DEFAULT_UNIVERSE)
 DEFAULT_COST = 0.0005
 
 
+def resolve_portfolio_universe(args) -> tuple[str, list[str]]:
+    preset, tickers = resolve_universe(args.universe, getattr(args, 'tickers', None))
+    validate_universe_size(tickers, args.top_frac)
+    return preset, tickers
+
+
 def add_portfolio_params(p: argparse.ArgumentParser) -> None:
-    p.add_argument('--universe', default=DEFAULT_UNIVERSE_STR,
-                   help='Comma-separated tickers (default: semis basket)')
+    p.add_argument('--universe', default=DEFAULT_PRESET,
+                   help='Universe preset name (default: semis). Use "portfolio universes" to list.')
+    p.add_argument('--tickers', default=None,
+                   help='Custom comma-separated tickers (overrides --universe)')
     p.add_argument('--signal', default='momentum',
                    choices=['momentum', 'reversal', 'all', 'combo'],
                    help='Cross-sectional signal (default: momentum)')
     p.add_argument('--years', type=int, default=5)
-    p.add_argument('--top-frac', type=float, default=0.33,
-                   help='Fraction long / short per leg (default 0.33)')
+    p.add_argument('--top-frac', type=float, default=DEFAULT_TOP_FRAC,
+                   help=f'Fraction long / short per leg (default {DEFAULT_TOP_FRAC})')
     p.add_argument('--rebalance', type=int, default=5,
                    help='Rebalance every N trading days (default 5)')
     p.add_argument('--short-window', type=int, default=5,
@@ -58,6 +84,28 @@ def add_portfolio_params(p: argparse.ArgumentParser) -> None:
     p.add_argument('--skip', type=int, default=21,
                    help='Momentum signal skip days (default 21)')
     p.add_argument('--no-explain', action='store_true')
+    p.add_argument('--no-single-stock', action='store_true',
+                   help='Skip per-stock mean-reversion & momentum analysis')
+    p.add_argument('--z-overextended', type=float, default=1.5,
+                   help='Combined: z above this → WAIT (default 1.5)')
+    p.add_argument('--z-oversold', type=float, default=-1.0,
+                   help='Combined: z below this → oversold bounce zone (default -1.0)')
+    p.add_argument('--no-require-momentum-buy', action='store_true',
+                   help='Combined: do not require momentum BUY for long entries')
+    p.add_argument('--allow-short-candidates', action='store_true',
+                   help='Combined: label SHORT_CANDIDATE (research only)')
+    p.add_argument('--no-long-only', action='store_true',
+                   help='Disable long-only interpretation of short leg')
+
+
+def combined_params_from_args(args) -> CombinedParams:
+    return CombinedParams(
+        z_overextended=args.z_overextended,
+        z_oversold=args.z_oversold,
+        require_momentum_buy=not args.no_require_momentum_buy,
+        allow_short_candidates=args.allow_short_candidates,
+        long_only_mode=not args.no_long_only,
+    )
 
 
 def panel_params_from_args(args) -> dict:
@@ -282,10 +330,57 @@ def cmd_watch(args) -> None:
         time.sleep(args.interval)
 
 
+def _print_single_stock_backtests(panel, weights, xs_scores, years, cost, skip: bool) -> None:
+    if skip:
+        return
+    df = analyze_universe_backtests(panel, cost, weights, xs_scores)
+    print_backtest_table(df, years)
+
+
+def _print_single_stock_snapshots(panel, weights, xs_scores, skip: bool,
+                                  combined: CombinedParams) -> None:
+    if skip:
+        return
+    df = build_combined_snapshot_df(panel, weights, xs_scores, combined)
+    print_combined_signal_report(df, combined)
+
+
+def cmd_portfolio_universes(_args) -> None:
+    print(format_universes_listing())
+
+
+def cmd_portfolio_compare(args) -> None:
+    preset, universe = resolve_portfolio_universe(args)
+    panel = fetch_panel(universe, args.years)
+    xs_params = panel_params_from_args(args)
+    xs_params['mode'] = 'momentum'
+    combined = combined_params_from_args(args)
+    rows = run_strategy_comparison(panel, xs_params, combined, DEFAULT_COST)
+    print_strategy_comparison(rows)
+    if not args.no_single_stock:
+        model = get_panel_model()
+        weights = model.current_weights(panel, **xs_params)
+        scores = model.current_ranks(panel, **xs_params)
+        _print_single_stock_snapshots(panel, weights, scores, False, combined)
+    print(f'\nUniverse preset: {preset} — {describe_preset(preset)}')
+
+
 def cmd_portfolio_backtest(args) -> None:
-    universe = parse_universe(args.universe)
+    if getattr(args, 'compare', False):
+        cmd_portfolio_compare(args)
+        return
+
+    preset, universe = resolve_portfolio_universe(args)
     panel = fetch_panel(universe, args.years)
     model = get_panel_model()
+    params = panel_params_from_args(args)
+    xs_mode = args.signal if args.signal in ('momentum', 'reversal') else 'momentum'
+    xs_params = {**params, 'mode': xs_mode}
+    xs_scores = model.current_ranks(panel, **xs_params)
+    try:
+        xs_weights = model.current_weights(panel, **xs_params)
+    except ValueError:
+        xs_weights = pd.Series(dtype=float)
     rows = []
 
     if args.signal in ('momentum', 'reversal'):
@@ -332,9 +427,17 @@ def cmd_portfolio_backtest(args) -> None:
                 f'Sharpe {bench["sharpe"]:.2f}, max DD {bench["max_dd"]:.1%}'
             )
 
+    _print_single_stock_backtests(
+        panel, xs_weights, xs_scores, args.years, DEFAULT_COST,
+        skip=args.no_single_stock,
+    )
+    if not args.no_single_stock:
+        combined = combined_params_from_args(args)
+        _print_single_stock_snapshots(panel, xs_weights, xs_scores, False, combined)
+
 
 def cmd_portfolio_ranks(args) -> None:
-    universe = parse_universe(args.universe)
+    preset, universe = resolve_portfolio_universe(args)
     panel = fetch_panel(universe, max(2, args.years))
     model = get_panel_model()
     params = panel_params_from_args(args)
@@ -343,7 +446,10 @@ def cmd_portfolio_ranks(args) -> None:
     params['mode'] = args.signal
     weights = model.current_weights(panel, **params)
     scores = model.current_ranks(panel, **params)
-    print(model.format_ranks(weights, scores, universe, **params))
+    print(model.format_ranks(weights, scores, universe, preset_name=preset, **params))
+    if not args.no_single_stock:
+        combined = combined_params_from_args(args)
+        _print_single_stock_snapshots(panel, weights, scores, False, combined)
     if not getattr(args, 'no_math', False):
         print(model.explain_math(**params))
 
@@ -416,8 +522,16 @@ def main() -> None:
     p_port = sub.add_parser('portfolio', help='Cross-sectional multi-stock model')
     p_port_sub = p_port.add_subparsers(dest='portfolio_cmd', required=True)
 
+    p_port_univ = p_port_sub.add_parser('universes', help='List universe presets')
+    p_port_univ.add_argument('--no-note', action='store_true', help='Skip selection note')
+
     p_port_bt = p_port_sub.add_parser('backtest', help='Backtest long/short universe')
     add_portfolio_params(p_port_bt)
+    p_port_bt.add_argument('--compare', action='store_true',
+                           help='Run full strategy comparison (incl. combined signal)')
+
+    p_port_cmp = p_port_sub.add_parser('compare', help='Compare all portfolio strategies')
+    add_portfolio_params(p_port_cmp)
 
     p_port_ranks = p_port_sub.add_parser('ranks', help='Current long/short targets')
     add_portfolio_params(p_port_ranks)
@@ -467,8 +581,12 @@ def main() -> None:
             }
             save_portfolio(portfolio, args.portfolio)
             print(f'Portfolio reset to ${DEFAULT_CASH:,.0f} cash.')
+        elif args.command == 'portfolio' and args.portfolio_cmd == 'universes':
+            cmd_portfolio_universes(args)
         elif args.command == 'portfolio' and args.portfolio_cmd == 'backtest':
             cmd_portfolio_backtest(args)
+        elif args.command == 'portfolio' and args.portfolio_cmd == 'compare':
+            cmd_portfolio_compare(args)
         elif args.command == 'portfolio' and args.portfolio_cmd == 'ranks':
             cmd_portfolio_ranks(args)
         elif args.command == 'help':

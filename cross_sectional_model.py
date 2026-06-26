@@ -11,11 +11,8 @@ from pathlib import Path
 import pandas as pd
 
 from quant.metrics import metrics
-from quant.models.cross_sectional import (
-    DEFAULT_UNIVERSE,
-    CrossSectionalModel,
-    simulate_panel,
-)
+from quant.models.cross_sectional import CrossSectionalModel, simulate_panel
+from quant.universes import DEFAULT_PRESET, get_universe
 from quant.reporting import explain_backtest
 
 
@@ -30,8 +27,15 @@ def header(title):
 
 
 if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(description='Cross-sectional synthetic demo')
+    parser.add_argument('--universe', default=DEFAULT_PRESET,
+                        help='Universe preset (default: semis)')
+    args = parser.parse_args()
+
     model = CrossSectionalModel()
-    px = simulate_panel(DEFAULT_UNIVERSE, n_days=1500, seed=1)
+    universe = get_universe(args.universe)
+    px = simulate_panel(universe, n_days=1500, seed=1)
 
     mom_df, _ = model.backtest(px, mode='momentum')
     rev_df, _ = model.backtest(
@@ -63,7 +67,7 @@ if __name__ == '__main__':
                          ('rev', 'XS Reversal (L/S)', 1.6),
                          ('combo', 'Combined 50/50', 1.9)]:
         plt.plot((1 + df[col]).cumprod().values, label=lab, lw=lw)
-    plt.title('Cross-sectional long/short on a 12-stock universe (growth of $1)')
+    plt.title(f'Cross-sectional long/short — {args.universe} universe (growth of $1)')
     plt.xlabel('Trading day')
     plt.ylabel('Equity (×$1)')
     plt.legend()
