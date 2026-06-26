@@ -30,6 +30,10 @@ CLI quick reference
   python cli.py portfolio ranks --universe mega_cap_tech
   python cli.py portfolio ranks --tickers MU,NVDA,AMD,AVGO,TSM,ASML
   python cli.py portfolio compare --years 5 --universe ai_infra
+  python cli.py portfolio momentum-compare --universe semis --years 5
+  python cli.py portfolio ranks --signal momentum --momentum-preset mom_20d
+  python cli.py portfolio ranks --signal momentum --compare-momentum-presets
+  python cli.py stock momentum-compare NVDA --years 5
 
 Paper trading only. Data from Yahoo Finance (free, ~15 min delayed).
 """

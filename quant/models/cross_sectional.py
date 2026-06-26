@@ -37,6 +37,7 @@ def compute_scores(prices: pd.DataFrame, mode: str = 'momentum',
 
     Momentum:
         score[t, i] = price[t-skip, i] / price[t-skip-lookback, i] - 1
+        lookback: return window length. skip: ignore most recent days (0 = use price[t]).
 
     Reversal:
         score[t, i] = -(price[t, i] / price[t-short_window, i] - 1)
@@ -237,14 +238,25 @@ Benchmark: equal-weight return of the full universe.
         p = {**self.default_params(), **params}
         longs = weights[weights > 0].sort_values(ascending=False)
         shorts = weights[weights < 0].sort_values()
+        mom_preset = params.get('momentum_preset', 'mom_126d_skip21')
+        from quant.momentum_presets import format_momentum_header_lines
         lines = [
             f'=== Cross-Sectional Book ({p["mode"]}) ===',
             f'Universe preset: {preset_name}',
             f'Universe ({len(universe)}): {", ".join(universe)}',
-            f'Rebalance every: {p["rebalance"]} days  |  Top/bottom frac: {p["top_frac"]:.0%}',
-            '',
-            'LONG leg:',
         ]
+        lines.extend(format_momentum_header_lines(
+            p['mode'], mom_preset, p['lookback'], p['skip'], p['rebalance'],
+        ))
+        if p['mode'] != 'momentum':
+            lines.append(
+                f'Rebalance every: {p["rebalance"]} days  |  Top/bottom frac: {p["top_frac"]:.0%}'
+            )
+            lines.append('')
+        else:
+            lines.append(f'Top/bottom frac: {p["top_frac"]:.0%}')
+            lines.append('')
+        lines.append('LONG leg:')
         for tk, wt in longs.items():
             sc = scores.get(tk, float('nan'))
             lines.append(f'  {tk:<6} weight {wt:+.2%}   score {sc:+.1%}')

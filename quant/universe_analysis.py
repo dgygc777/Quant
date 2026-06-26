@@ -18,11 +18,12 @@ def _recommendation(model, row: pd.Series, in_position: bool = False) -> str:
     return 'WAIT'
 
 
-def snapshot_ticker(price: pd.Series, mr: MeanReversionModel, mom: MomentumModel) -> dict:
+def snapshot_ticker(price: pd.Series, mr: MeanReversionModel, mom: MomentumModel,
+                    mom_params: dict | None = None) -> dict:
     """Latest single-stock mean-reversion and momentum readings."""
     ticker = str(price.name or price.index.name or 'TICKER')
     mr_p = mr.default_params()
-    mom_p = mom.default_params()
+    mom_p = {**mom.default_params(), **(mom_params or {})}
 
     mr_df = mr.compute_indicators(price, **mr_p).dropna()
     mom_df = mom.compute_indicators(price, **mom_p).dropna()

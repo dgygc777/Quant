@@ -48,6 +48,7 @@ class MomentumModel(TradingModel):
         df = pd.DataFrame({'price': price})
         df['ret'] = df['price'].pct_change()
 
+        # lookback: return window. skip: ignore recent days (reversal/noise filter).
         # Return from (t - skip - lookback) to (t - skip); both points are in the past.
         past = df['price'].shift(skip) / df['price'].shift(skip + lookback) - 1.0
         df['momentum'] = past
@@ -125,8 +126,9 @@ class MomentumModel(TradingModel):
         return f"""
 How the math works (time-series momentum)
 -----------------------------------------
-1. Lookback: {lookback} trading days of past return, skipping the most recent {skip}
-   days (avoids short-term reversal contaminating the medium-term trend).
+1. Lookback ({lookback}d): how far back the return window extends.
+   Skip ({skip}d): ignore the most recent days (reduces short-term reversal noise).
+   When skip=0: momentum = price[t] / price[t-{lookback}] - 1
 
    momentum = price[t-{skip}] / price[t-{skip}-{lookback}] - 1
 

@@ -54,6 +54,16 @@ from quant.universes import (
     resolve_universe,
     validate_universe_size,
 )
+from quant.momentum_presets import (
+    build_momentum_preset_rank_table,
+    print_momentum_preset_rank_table,
+    print_single_stock_momentum_comparison,
+    print_xs_momentum_preset_comparison,
+    resolve_momentum_params,
+    run_single_stock_momentum_comparison,
+    run_xs_momentum_preset_comparison,
+    validate_momentum_params,
+)
 
 DEFAULT_COST = 0.0005
 
@@ -79,10 +89,14 @@ def add_portfolio_params(p: argparse.ArgumentParser) -> None:
                    help='Rebalance every N trading days (default 5)')
     p.add_argument('--short-window', type=int, default=5,
                    help='Reversal signal lookback in days (default 5)')
-    p.add_argument('--lookback', type=int, default=126,
-                   help='Momentum signal lookback (default 126)')
-    p.add_argument('--skip', type=int, default=21,
-                   help='Momentum signal skip days (default 21)')
+    p.add_argument('--momentum-preset', default=None,
+                   help='Named momentum lookback (mom_10d, mom_20d, mom_63d, mom_126d_skip21)')
+    p.add_argument('--lookback', type=int, default=None,
+                   help='Momentum lookback days (overrides --momentum-preset)')
+    p.add_argument('--skip', type=int, default=None,
+                   help='Momentum skip days (overrides --momentum-preset)')
+    p.add_argument('--compare-momentum-presets', action='store_true',
+                   help='Show current ranks across all momentum presets')
     p.add_argument('--no-explain', action='store_true')
     p.add_argument('--no-single-stock', action='store_true',
                    help='Skip per-stock mean-reversion & momentum analysis')
@@ -109,14 +123,24 @@ def combined_params_from_args(args) -> CombinedParams:
 
 
 def panel_params_from_args(args) -> dict:
+    mom_preset, lookback, skip = resolve_momentum_params(
+        getattr(args, 'momentum_preset', None),
+        getattr(args, 'lookback', None),
+        getattr(args, 'skip', None),
+    )
     return {
         'mode': args.signal if args.signal not in ('all', 'combo') else 'momentum',
         'top_frac': args.top_frac,
         'rebalance': args.rebalance,
         'short_window': args.short_window,
-        'lookback': args.lookback,
-        'skip': args.skip,
+        'lookback': lookback,
+        'skip': skip,
+        'momentum_preset': mom_preset,
     }
+
+
+def mom_params_from_panel(params: dict) -> dict:
+    return {'lookback': params['lookback'], 'skip': params['skip']}
 
 
 def add_common_args(p: argparse.ArgumentParser) -> None:
@@ -137,10 +161,12 @@ def add_strategy_params(p: argparse.ArgumentParser) -> None:
                    help='Mean-reversion: enter when z < this')
     p.add_argument('--exit-z', type=float, default=0.0,
                    help='Mean-reversion: exit when z >= this')
-    p.add_argument('--lookback', type=int, default=126,
-                   help='Momentum: lookback window in days (default 126)')
-    p.add_argument('--skip', type=int, default=21,
-                   help='Momentum: skip recent days in signal (default 21)')
+    p.add_argument('--lookback', type=int, default=None,
+                   help='Momentum: lookback window in days (default: classic 126)')
+    p.add_argument('--skip', type=int, default=None,
+                   help='Momentum: skip recent days in signal (default: classic 21)')
+    p.add_argument('--momentum-preset', default=None,
+                   help='Momentum: named preset (mom_10d, mom_20d, mom_63d, mom_126d_skip21)')
     p.add_argument('--vol-window', type=int, default=63,
                    help='Momentum: realized-vol rolling window (default 63)')
     p.add_argument('--target-vol', type=float, default=0.15,
@@ -163,10 +189,14 @@ def model_params_from_args(model, args) -> dict:
         if hasattr(args, 'exit_z'):
             params['exit_z'] = args.exit_z
     elif model.slug == 'momentum':
-        if hasattr(args, 'lookback'):
-            params['lookback'] = args.lookback
-        if hasattr(args, 'skip'):
-            params['skip'] = args.skip
+        mom_preset, lb, sk = resolve_momentum_params(
+            getattr(args, 'momentum_preset', None),
+            getattr(args, 'lookback', None),
+            getattr(args, 'skip', None),
+        )
+        params['lookback'] = lb
+        params['skip'] = sk
+        params['momentum_preset'] = mom_preset
         if hasattr(args, 'vol_window'):
             params['vol_window'] = args.vol_window
         if hasattr(args, 'target_vol'):
@@ -338,10 +368,15 @@ def _print_single_stock_backtests(panel, weights, xs_scores, years, cost, skip: 
 
 
 def _print_single_stock_snapshots(panel, weights, xs_scores, skip: bool,
-                                  combined: CombinedParams) -> None:
+                                  combined: CombinedParams,
+                                  mom_params: dict | None = None,
+                                  momentum_preset: str = 'mom_126d_skip21') -> None:
     if skip:
         return
-    df = build_combined_snapshot_df(panel, weights, xs_scores, combined)
+    df = build_combined_snapshot_df(
+        panel, weights, xs_scores, combined,
+        mom_params=mom_params, momentum_preset=momentum_preset,
+    )
     print_combined_signal_report(df, combined)
 
 
@@ -354,6 +389,7 @@ def cmd_portfolio_compare(args) -> None:
     panel = fetch_panel(universe, args.years)
     xs_params = panel_params_from_args(args)
     xs_params['mode'] = 'momentum'
+    validate_momentum_params(xs_params['lookback'], xs_params['skip'], n_days=len(panel))
     combined = combined_params_from_args(args)
     rows = run_strategy_comparison(panel, xs_params, combined, DEFAULT_COST)
     print_strategy_comparison(rows)
@@ -361,7 +397,11 @@ def cmd_portfolio_compare(args) -> None:
         model = get_panel_model()
         weights = model.current_weights(panel, **xs_params)
         scores = model.current_ranks(panel, **xs_params)
-        _print_single_stock_snapshots(panel, weights, scores, False, combined)
+        _print_single_stock_snapshots(
+            panel, weights, scores, False, combined,
+            mom_params=mom_params_from_panel(xs_params),
+            momentum_preset=xs_params['momentum_preset'],
+        )
     print(f'\nUniverse preset: {preset} — {describe_preset(preset)}')
 
 
@@ -372,8 +412,9 @@ def cmd_portfolio_backtest(args) -> None:
 
     preset, universe = resolve_portfolio_universe(args)
     panel = fetch_panel(universe, args.years)
-    model = get_panel_model()
     params = panel_params_from_args(args)
+    validate_momentum_params(params['lookback'], params['skip'], n_days=len(panel))
+    model = get_panel_model()
     xs_mode = args.signal if args.signal in ('momentum', 'reversal') else 'momentum'
     xs_params = {**params, 'mode': xs_mode}
     xs_scores = model.current_ranks(panel, **xs_params)
@@ -433,14 +474,39 @@ def cmd_portfolio_backtest(args) -> None:
     )
     if not args.no_single_stock:
         combined = combined_params_from_args(args)
-        _print_single_stock_snapshots(panel, xs_weights, xs_scores, False, combined)
+        _print_single_stock_snapshots(
+            panel, xs_weights, xs_scores, False, combined,
+            mom_params=mom_params_from_panel(xs_params),
+            momentum_preset=xs_params['momentum_preset'],
+        )
+
+
+def cmd_portfolio_momentum_compare(args) -> None:
+    preset, universe = resolve_portfolio_universe(args)
+    panel = fetch_panel(universe, args.years)
+    base = {
+        'top_frac': args.top_frac,
+        'rebalance': args.rebalance,
+        'market_neutral': True,
+    }
+    rows = run_xs_momentum_preset_comparison(panel, base, DEFAULT_COST)
+    print_xs_momentum_preset_comparison(rows, preset, args.years)
 
 
 def cmd_portfolio_ranks(args) -> None:
     preset, universe = resolve_portfolio_universe(args)
     panel = fetch_panel(universe, max(2, args.years))
-    model = get_panel_model()
     params = panel_params_from_args(args)
+    validate_momentum_params(params['lookback'], params['skip'], n_days=len(panel))
+
+    if getattr(args, 'compare_momentum_presets', False):
+        if args.signal != 'momentum':
+            raise ValueError('--compare-momentum-presets requires --signal momentum')
+        df = build_momentum_preset_rank_table(panel)
+        print_momentum_preset_rank_table(df)
+        return
+
+    model = get_panel_model()
     if args.signal in ('all', 'combo'):
         raise ValueError('ranks requires --signal momentum or reversal')
     params['mode'] = args.signal
@@ -449,9 +515,21 @@ def cmd_portfolio_ranks(args) -> None:
     print(model.format_ranks(weights, scores, universe, preset_name=preset, **params))
     if not args.no_single_stock:
         combined = combined_params_from_args(args)
-        _print_single_stock_snapshots(panel, weights, scores, False, combined)
+        _print_single_stock_snapshots(
+            panel, weights, scores, False, combined,
+            mom_params=mom_params_from_panel(params),
+            momentum_preset=params['momentum_preset'],
+        )
     if not getattr(args, 'no_math', False):
         print(model.explain_math(**params))
+
+
+def cmd_stock_momentum_compare(args) -> None:
+    ticker = args.ticker.upper()
+    hist = fetch_historical_prices(ticker, args.years)
+    validate_momentum_params(126, 21, n_days=len(hist))
+    rows = run_single_stock_momentum_comparison(hist.rename(ticker), DEFAULT_COST)
+    print_single_stock_momentum_comparison(rows, ticker, args.years)
 
 
 def main() -> None:
@@ -537,6 +615,20 @@ def main() -> None:
     add_portfolio_params(p_port_ranks)
     p_port_ranks.add_argument('--no-math', action='store_true')
 
+    p_port_momcmp = p_port_sub.add_parser(
+        'momentum-compare', help='Compare cross-sectional momentum lookbacks',
+    )
+    add_portfolio_params(p_port_momcmp)
+    p_port_momcmp.set_defaults(signal='momentum')
+
+    p_stock = sub.add_parser('stock', help='Single-stock analysis tools')
+    p_stock_sub = p_stock.add_subparsers(dest='stock_cmd', required=True)
+    p_stock_momcmp = p_stock_sub.add_parser(
+        'momentum-compare', help='Compare momentum lookbacks on one ticker',
+    )
+    p_stock_momcmp.add_argument('ticker')
+    p_stock_momcmp.add_argument('--years', type=int, default=5)
+
     p_help = sub.add_parser('help', help='Show CLI usage')
     p_help.add_argument('topic', nargs='?', default='')
 
@@ -589,6 +681,10 @@ def main() -> None:
             cmd_portfolio_compare(args)
         elif args.command == 'portfolio' and args.portfolio_cmd == 'ranks':
             cmd_portfolio_ranks(args)
+        elif args.command == 'portfolio' and args.portfolio_cmd == 'momentum-compare':
+            cmd_portfolio_momentum_compare(args)
+        elif args.command == 'stock' and args.stock_cmd == 'momentum-compare':
+            cmd_stock_momentum_compare(args)
         elif args.command == 'help':
             print(cli_usage_block())
         else:

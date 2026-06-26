@@ -106,9 +106,13 @@ def _signal_series(model, df: pd.DataFrame) -> pd.Series:
     return pd.Series(out, index=df.index)
 
 
-def precompute_single_stock_signals(panel: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def precompute_single_stock_signals(
+    panel: pd.DataFrame,
+    mom_params: dict | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Per-ticker z-score and MR / momentum signal panels."""
     mr_model, mom_model = MeanReversionModel(), MomentumModel()
+    mom_p = {**mom_model.default_params(), **(mom_params or {})}
     z_panel = pd.DataFrame(index=panel.index, columns=panel.columns, dtype=float)
     mr_panel = pd.DataFrame(index=panel.index, columns=panel.columns, dtype=object)
     mom_panel = pd.DataFrame(index=panel.index, columns=panel.columns, dtype=object)
@@ -116,7 +120,7 @@ def precompute_single_stock_signals(panel: pd.DataFrame) -> tuple[pd.DataFrame, 
     for col in panel.columns:
         price = panel[col].dropna()
         mr_df = mr_model.compute_indicators(price.rename(col))
-        mom_df = mom_model.compute_indicators(price.rename(col))
+        mom_df = mom_model.compute_indicators(price.rename(col), **mom_p)
         z_panel.loc[mr_df.index, col] = mr_df['z']
         mr_panel.loc[mr_df.index, col] = _signal_series(mr_model, mr_df)
         mom_panel.loc[mom_df.index, col] = _signal_series(mom_model, mom_df)
@@ -134,14 +138,19 @@ def apply_combined_to_row(xs_leg: str, z: float, mr_sig: str, mom_sig: str,
 
 def build_combined_snapshot_df(panel: pd.DataFrame, xs_weights: pd.Series,
                                xs_scores: pd.Series,
-                               p: CombinedParams) -> pd.DataFrame:
+                               p: CombinedParams,
+                               mom_params: dict | None = None,
+                               momentum_preset: str = 'mom_126d_skip21') -> pd.DataFrame:
     """Latest combined signal row per ticker."""
     from quant.universe_analysis import snapshot_ticker
 
     mr_model, mom_model = MeanReversionModel(), MomentumModel()
+    mom_p = {**mom_model.default_params(), **(mom_params or {})}
     rows = []
     for ticker in panel.columns:
-        snap = snapshot_ticker(panel[ticker].dropna().rename(ticker), mr_model, mom_model)
+        snap = snapshot_ticker(
+            panel[ticker].dropna().rename(ticker), mr_model, mom_model, mom_params=mom_p,
+        )
         leg = xs_leg_from_weight(float(xs_weights.get(ticker, 0.0)))
         action, reason = apply_combined_to_row(
             leg, snap['z'], snap['mr_signal'], snap['mom_signal'], p,
@@ -150,6 +159,7 @@ def build_combined_snapshot_df(panel: pd.DataFrame, xs_weights: pd.Series,
             **snap,
             'xs_score': float(xs_scores.get(ticker, float('nan'))),
             'xs_leg': leg,
+            'momentum_preset': momentum_preset,
             'final_action': action,
             'reason': reason,
         })
@@ -165,13 +175,14 @@ def print_combined_signal_report(df: pd.DataFrame, p: CombinedParams) -> None:
         print(f'Actionable BUY candidates ({len(buys)}): {", ".join(buys)}')
     print()
     print(f'{"Ticker":<7}{"XS":<6}{"XS score":>9}{"Price":>10}{"Z":>7}'
-          f'{"MR":>5}{"Mom score":>10}{"Mom sig":>8}{"Final":>14}{"  Reason"}')
-    print('-' * 108)
+          f'{"MR":>5}{"Mom preset":<12}{"Mom score":>10}{"Mom sig":>8}{"Final":>14}{"  Reason"}')
+    print('-' * 120)
     for _, r in df.iterrows():
         reason_short = r['reason'] if len(r['reason']) <= 38 else r['reason'][:35] + '...'
+        mom_preset = r.get('momentum_preset', 'mom_126d_skip21')
         print(f'{r["ticker"]:<7}{r["xs_leg"]:<6}{r["xs_score"]:>+8.1%}'
               f'{r["price"]:>10.2f}{r["z"]:>+7.2f}'
-              f'{r["mr_signal"]:>5}{r["momentum"]:>+9.1%}'
+              f'{r["mr_signal"]:>5}{mom_preset:<12}{r["momentum"]:>+9.1%}'
               f'{r["mom_signal"]:>8}{r["final_action"]:>14}  {reason_short}')
 
 
@@ -199,7 +210,8 @@ def backtest_combined_long_only(
         rebalance=xs_params.get('rebalance', 5),
         market_neutral=True,
     )
-    z_panel, mr_panel, mom_panel = precompute_single_stock_signals(panel)
+    mom_kw = {k: xs_params[k] for k in ('lookback', 'skip') if k in xs_params}
+    z_panel, mr_panel, mom_panel = precompute_single_stock_signals(panel, mom_params=mom_kw)
 
     weights = pd.DataFrame(0.0, index=panel.index, columns=panel.columns)
     last_w = pd.Series(0.0, index=panel.columns)

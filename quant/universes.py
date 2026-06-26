@@ -13,28 +13,43 @@ from __future__ import annotations
 DEFAULT_PRESET = 'semis'
 
 UNIVERSE_PRESETS: dict[str, list[str]] = {
+    # Core semiconductor universe: designers, memory, foundry, packaging, equipment
     'semis': [
-        'MU', 'NVDA', 'AMD', 'AVGO', 'QCOM', 'TSM',
+        'MU', 'SNDK', 'NVDA', 'AMD', 'AVGO', 'QCOM', 'TSM',
         'ASX', 'AMAT', 'LRCX', 'KLAC', 'INTC', 'ASML', 'MRVL',
     ],
+
+    # Semiconductor equipment / wafer-fab tool makers
     'semi_equipment': [
         'AMAT', 'LRCX', 'KLAC', 'ASML',
     ],
+
+    # Memory and storage names
+    'memory_storage': [
+        'MU', 'SNDK', 'WDC', 'STX',
+    ],
+
+    # Foundry / manufacturing / packaging exposure
+    'foundry_packaging': [
+        'TSM', 'ASX', 'INTC',
+    ],
+
+    # Mega-cap technology / platform companies
     'mega_cap_tech': [
         'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'NVDA', 'AVGO', 'TSLA',
     ],
+
+    # AI infrastructure: chips, memory, foundry, equipment, cloud platforms
     'ai_infra': [
-        'NVDA', 'AMD', 'AVGO', 'MU', 'MRVL', 'TSM',
+        'NVDA', 'AMD', 'AVGO', 'MU', 'SNDK', 'MRVL', 'TSM',
         'ASML', 'AMAT', 'LRCX', 'KLAC', 'MSFT', 'GOOGL', 'AMZN',
     ],
+
+    # Broad tech / AI / semiconductor basket
     'broad_tech': [
-        'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'NVDA', 'AMD',
-        'AVGO', 'QCOM', 'TSM', 'ASML', 'AMAT', 'LRCX', 'KLAC',
-        'MU', 'MRVL', 'INTC',
-    ],
-    'asx_large_caps': [
-        'BHP.AX', 'CBA.AX', 'CSL.AX', 'WDS.AX', 'WOW.AX',
-        'RIO.AX', 'WES.AX', 'MQG.AX',
+        'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META',
+        'NVDA', 'AMD', 'AVGO', 'QCOM', 'TSM', 'ASML',
+        'AMAT', 'LRCX', 'KLAC', 'MU', 'SNDK', 'MRVL', 'INTC',
     ],
 }
 
@@ -44,10 +59,11 @@ DEFAULT_UNIVERSE = UNIVERSE_PRESETS[DEFAULT_PRESET]
 UNIVERSE_DESCRIPTIONS: dict[str, str] = {
     'semis': 'Which semiconductor names are strongest relative to other semiconductor names?',
     'semi_equipment': 'Which semi equipment names lead vs other equipment peers?',
+    'memory_storage': 'Which memory and storage names lead vs other memory/storage peers?',
+    'foundry_packaging': 'Which foundry/packaging names lead vs other manufacturing peers?',
     'mega_cap_tech': 'Which mega-cap tech names are strongest relative to other mega-cap tech names?',
     'ai_infra': 'Which AI infrastructure names are strongest relative to the AI infrastructure basket?',
     'broad_tech': 'Which broad tech names rank highest within a diversified tech basket?',
-    'asx_large_caps': 'Which ASX large caps lead vs other ASX large caps?',
     'custom': 'Custom ticker list supplied by the user.',
 }
 

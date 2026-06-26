@@ -68,6 +68,8 @@ quant/
   portfolio.py                  Paper portfolio JSON persistence
   registry.py                   Model registry
   universes.py                  Named universe presets + helpers
+  universes.py                  Named universe presets + helpers
+  momentum_presets.py           Named momentum lookback presets + comparisons
   combined_signal.py            XS + MR + momentum decision layer
   universe_analysis.py          Per-stock snapshots and backtests in a panel
   models/
@@ -124,15 +126,23 @@ Logic:
   • Position size scaled inversely to realized volatility (vol targeting)
 
 Default parameters:
-  --lookback 126         Signal lookback window
-  --skip 21              Skip recent days in signal
+  --momentum-preset mom_126d_skip21   Named lookback preset (see section 5.5)
+  --lookback N                        Override preset lookback (days)
+  --skip N                            Override preset skip (days)
   --vol-window 63        Realized vol rolling window
   --target-vol 0.15      Annual vol target (15%)
   --max-leverage 3.0     Max position weight
   --no-vol-scale         Disable vol targeting
   --short                Allow short positions (long/short mode)
 
-Best for: riding medium-term trends in a single name with risk-aware sizing.
+Momentum formula:
+  momentum[t] = price[t-skip] / price[t-skip-lookback] - 1
+  lookback: how far back the signal looks. skip: ignore recent days (noise filter).
+  When skip=0: momentum[t] = price[t] / price[t-lookback] - 1
+
+Default (classic): lookback=126, skip=21 (mom_126d_skip21 preset)
+
+Best for: riding trends in a single name with risk-aware sizing.
 
 
 --------------------------------------------------------------------------------
@@ -152,10 +162,11 @@ Default parameters:
   --signal momentum       momentum | reversal | all | combo
   --universe semis        Named preset (see section 5)
   --tickers A,B,C         Custom comma-separated list (overrides --universe)
+  --momentum-preset NAME  Named momentum lookback (see section 5.5)
+  --lookback N            Momentum lookback (overrides preset)
+  --skip N                Momentum skip (overrides preset)
   --top-frac 0.25         Fraction long and short per leg (25% each)
-  --rebalance 5           Rebalance every N trading days
-  --lookback 126          Momentum signal lookback
-  --skip 21               Momentum signal skip
+  --rebalance 5           Rebalance every N trading days (separate from lookback)
   --short-window 5        Reversal signal lookback
 
 Important:
@@ -203,30 +214,34 @@ question. List all presets:
 
 Available presets:
 
-  semis (13)
-    MU, NVDA, AMD, AVGO, QCOM, TSM, ASX, AMAT, LRCX, KLAC, INTC, ASML, MRVL
+  semis (14)
+    MU, SNDK, NVDA, AMD, AVGO, QCOM, TSM, ASX, AMAT, LRCX, KLAC, INTC, ASML, MRVL
     → Which semiconductor names are strongest relative to other semis?
 
   semi_equipment (4)
     AMAT, LRCX, KLAC, ASML
     → Which semi equipment names lead vs other equipment peers?
 
+  memory_storage (4)
+    MU, SNDK, WDC, STX
+    → Which memory and storage names lead vs other memory/storage peers?
+
+  foundry_packaging (3)
+    TSM, ASX, INTC
+    → Which foundry/packaging names lead vs other manufacturing peers?
+
   mega_cap_tech (8)
     AAPL, MSFT, GOOGL, AMZN, META, NVDA, AVGO, TSLA
     → Which mega-cap tech names are strongest vs other mega-cap tech?
 
-  ai_infra (13)
-    NVDA, AMD, AVGO, MU, MRVL, TSM, ASML, AMAT, LRCX, KLAC, MSFT, GOOGL, AMZN
+  ai_infra (14)
+    NVDA, AMD, AVGO, MU, SNDK, MRVL, TSM, ASML, AMAT, LRCX, KLAC, MSFT, GOOGL, AMZN
     → Which AI infrastructure names lead vs the AI infra basket?
 
-  broad_tech (17)
+  broad_tech (18)
     AAPL, MSFT, GOOGL, AMZN, META, NVDA, AMD, AVGO, QCOM, TSM, ASML, AMAT,
-    LRCX, KLAC, MU, MRVL, INTC
+    LRCX, KLAC, MU, SNDK, MRVL, INTC
     → Which broad tech names rank highest in a diversified tech basket?
-
-  asx_large_caps (8)
-    BHP.AX, CBA.AX, CSL.AX, WDS.AX, WOW.AX, RIO.AX, WES.AX, MQG.AX
-    → Which ASX large caps lead vs other ASX large caps?
 
 Default preset: semis
 
@@ -240,8 +255,48 @@ Rules:
       len(tickers) >= 2 * k, where k = round(top_frac * len(tickers))
   • If too few names, add tickers or lower --top-frac
 
-Note: "ASX" in the semis preset is ASE Technology (NYSE: ASX), not the
-Australian exchange. Australian stocks use the .AX suffix.
+Note: "ASX" in semis/foundry_packaging is ASE Technology (NYSE: ASX), not the
+Australian exchange. Use a .AX suffix for Australian listings in --tickers.
+
+foundry_packaging has only 3 names — use default --top-frac 0.25 or lower;
+higher fractions may fail the minimum-size check.
+
+
+================================================================================
+5.5 MOMENTUM PRESETS
+================================================================================
+
+Momentum lookback presets control how far back the signal looks and how many
+recent days to skip. rebalance is separate — it controls portfolio update frequency.
+
+Formula (single-stock and cross-sectional):
+  momentum[t] = price[t-skip] / price[t-skip-lookback] - 1
+
+Available presets:
+
+  mom_10d           lookback=10,  skip=0   — 10-day short-term momentum
+  mom_20d           lookback=20,  skip=0   — ~1-month momentum
+  mom_63d           lookback=63,  skip=0   — ~3-month momentum
+  mom_126d_skip21   lookback=126, skip=21  — classic medium-term (default)
+
+Interpretation:
+  • 10-day: fast and reactive, but noisy; higher turnover
+  • 20-day: roughly one trading month; useful for short swings
+  • 63-day: roughly one quarter; more stable trend signal
+  • 126-day skip-21: classic medium-term; slower, skips recent reversal
+
+Rules:
+  • --momentum-preset sets lookback/skip
+  • --lookback / --skip override preset when explicitly provided
+  • Default when unspecified: mom_126d_skip21 (126 / 21)
+  • lookback must be > 0; skip must be >= 0
+  • lookback + skip must be less than available history
+
+Examples:
+  python3 cli.py portfolio ranks --signal momentum --momentum-preset mom_10d
+  python3 cli.py portfolio ranks --signal momentum --momentum-preset mom_20d
+  python3 cli.py portfolio ranks --signal momentum --lookback 20 --skip 0
+  python3 cli.py signal NVDA --model momentum --momentum-preset mom_63d
 
 
 ================================================================================
@@ -395,6 +450,9 @@ Options:
   --signal momentum|reversal     (required: not "all" or "combo")
   --universe PRESET              default: semis
   --tickers T1,T2,...            custom list (overrides --universe)
+  --momentum-preset NAME         mom_10d | mom_20d | mom_63d | mom_126d_skip21
+  --lookback N / --skip N        override momentum preset
+  --compare-momentum-presets     show ranks for all presets side-by-side
   --years N                      history to fetch (default 5)
   --top-frac F                   long/short fraction (default 0.25)
   --rebalance N                  rebalance interval (default 5)
@@ -405,7 +463,9 @@ Options:
 Examples:
   python3 cli.py portfolio ranks --signal momentum
   python3 cli.py portfolio ranks --signal momentum --universe semis
-  python3 cli.py portfolio ranks --signal momentum --universe mega_cap_tech
+  python3 cli.py portfolio ranks --signal momentum --momentum-preset mom_20d
+  python3 cli.py portfolio ranks --signal momentum --lookback 10 --skip 0
+  python3 cli.py portfolio ranks --signal momentum --compare-momentum-presets
   python3 cli.py portfolio ranks --signal reversal --universe ai_infra
   python3 cli.py portfolio ranks --tickers MU,NVDA,AMD,AVGO,TSM,ASML
 
@@ -467,8 +527,40 @@ Compares:
 Also prints per-stock combined signal snapshot and universe description.
 
 
+--------------------------------------------------------------------------------
+9.5 portfolio momentum-compare — compare momentum lookbacks (cross-sectional)
+--------------------------------------------------------------------------------
+
+  python3 cli.py portfolio momentum-compare [options]
+
+Runs cross-sectional momentum backtests for mom_10d, mom_20d, mom_63d, and
+mom_126d_skip21 on the same universe. Prints comparison table with return,
+Sharpe, drawdown, turnover, and benchmark correlation.
+
+Examples:
+  python3 cli.py portfolio momentum-compare --universe semis --years 5
+  python3 cli.py portfolio momentum-compare --universe mega_cap_tech --years 3
+
+
 ================================================================================
-10. STANDALONE DEMO SCRIPTS (SYNTHETIC DATA)
+10. CLI COMMANDS — SINGLE-STOCK TOOLS
+================================================================================
+
+--------------------------------------------------------------------------------
+10.1 stock momentum-compare — compare momentum lookbacks on one ticker
+--------------------------------------------------------------------------------
+
+  python3 cli.py stock momentum-compare TICKER [--years N]
+
+Compares 10d, 20d, 63d, and 126d-skip-21 momentum backtests vs buy-and-hold.
+
+Examples:
+  python3 cli.py stock momentum-compare NVDA --years 5
+  python3 cli.py stock momentum-compare MU --years 3
+
+
+================================================================================
+11. STANDALONE DEMO SCRIPTS (SYNTHETIC DATA)
 ================================================================================
 
 These run without Yahoo Finance and use simulated price data. Useful for
@@ -488,7 +580,7 @@ The cross-sectional demo saves portfolio_curves.png in the project root.
 
 
 ================================================================================
-11. COMMON OPTIONS REFERENCE
+12. COMMON OPTIONS REFERENCE
 ================================================================================
 
 Shared across many commands:
@@ -507,11 +599,12 @@ Momentum tuning:
 
 Portfolio / cross-sectional tuning:
   --universe semis --tickers A,B,C --signal momentum
+  --momentum-preset mom_20d --lookback 20 --skip 0
   --top-frac 0.25 --rebalance 5 --short-window 5
 
 
 ================================================================================
-12. METRICS & REPORTING
+13. METRICS & REPORTING
 ================================================================================
 
 Backtests report:
@@ -528,7 +621,7 @@ why results may differ from buy-and-hold.
 
 
 ================================================================================
-13. TICKER FORMATS
+14. TICKER FORMATS
 ================================================================================
 
   US stocks:     NVDA, MU, AAPL
@@ -538,7 +631,7 @@ Invalid or delisted tickers will raise an error when fetching data.
 
 
 ================================================================================
-14. QUICK START EXAMPLES
+15. QUICK START EXAMPLES
 ================================================================================
 
 # Explore what's available
@@ -559,6 +652,11 @@ python3 cli.py portfolio ranks --signal momentum --universe mega_cap_tech
 python3 cli.py portfolio compare --years 5 --universe ai_infra
 python3 cli.py portfolio ranks --tickers MU,NVDA,AMD,AVGO,TSM,ASML
 
+# Momentum lookback comparison
+python3 cli.py portfolio momentum-compare --universe semis --years 5
+python3 cli.py stock momentum-compare NVDA --years 5
+python3 cli.py portfolio ranks --signal momentum --compare-momentum-presets
+
 # Paper trading
 python3 cli.py run MU --model mean-reversion
 python3 cli.py buy NVDA
@@ -567,7 +665,7 @@ python3 cli.py history
 
 
 ================================================================================
-15. TROUBLESHOOTING
+16. TROUBLESHOOTING
 ================================================================================
 
 Unknown universe:
