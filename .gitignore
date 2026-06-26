@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Local paper-trading state (per-machine)
+paper_portfolio.json
+
+# Generated outputs
+reports/
+*.png
+
+.DS_Store
