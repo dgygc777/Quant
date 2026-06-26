@@ -26,6 +26,33 @@ def fetch_daily_prices(ticker: str, lookback_days: int = 120) -> pd.Series:
     return close
 
 
+def parse_universe(text: str) -> list[str]:
+    """Parse comma-separated ticker list."""
+    return [t.strip().upper() for t in text.split(',') if t.strip()]
+
+
+def fetch_panel(tickers: list[str], years: int) -> pd.DataFrame:
+    """Download multi-year daily close panel for cross-sectional models."""
+    tickers = [t.upper() for t in tickers]
+    data = yf.download(
+        tickers,
+        start=(pd.Timestamp.now() - pd.DateOffset(years=years)).strftime('%Y-%m-%d'),
+        auto_adjust=True,
+        progress=False,
+        threads=False,
+    )
+    if data.empty:
+        raise ValueError(f'No data returned for universe: {", ".join(tickers)}')
+    if isinstance(data.columns, pd.MultiIndex):
+        close = data['Close'].dropna(how='all')
+    else:
+        close = pd.DataFrame({tickers[0]: data['Close']}).dropna(how='all')
+    close.columns = [str(c).upper() for c in close.columns]
+    if close.shape[1] < 2:
+        raise ValueError('Cross-sectional backtest needs at least 2 tickers with data.')
+    return close
+
+
 def fetch_historical_prices(ticker: str, years: int) -> pd.Series:
     """Download multi-year daily close for backtesting."""
     data = yf.download(

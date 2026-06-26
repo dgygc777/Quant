@@ -104,3 +104,42 @@ def run_model_backtest(model, price, cost: float, explain: bool, years: int,
         'strat': strat,
         'hold': hold,
     }
+
+
+def xs_win_rate(df: pd.DataFrame) -> float:
+    r = df['strat_net'].dropna()
+    return float((r > 0).mean()) if len(r) else float('nan')
+
+
+def print_xs_backtest_report(title: str, strat: dict, bench: dict, n_rebal: int,
+                             win_rate_val: float, explain: bool = True) -> None:
+    """Print cross-sectional strategy vs equal-weight universe benchmark."""
+    print(f'\n=== {title} ===')
+    print(f'{"":18}{"STRATEGY":>12}{"EW UNIV":>12}')
+    print(f'{"Annual return":18}{strat["ann_return"]:>11.1%}{bench["ann_return"]:>12.1%}')
+    print(f'{"Annual vol":18}{strat["ann_vol"]:>11.1%}{bench["ann_vol"]:>12.1%}')
+    print(f'{"Sharpe ratio":18}{strat["sharpe"]:>12.2f}{bench["sharpe"]:>12.2f}')
+    print(f'{"Max drawdown":18}{strat["max_dd"]:>11.1%}{bench["max_dd"]:>12.1%}')
+    print(f'{"Rebalances":18}{n_rebal:>12}{"-":>12}')
+    print(f'{"Win rate (days)":18}{win_rate_val:>11.1%}{"-":>12}')
+    if explain:
+        print(explain_backtest(strat, bench, n_rebal, win_rate_val))
+
+
+def run_panel_backtest(model, panel, cost: float, explain: bool, years: int,
+                       label: str, **params) -> dict:
+    df, n_rebal = model.backtest(panel, cost=cost, **params)
+    strat = metrics(df['strat_net'])
+    bench = metrics(df['ret'])
+    wr = xs_win_rate(df)
+    print_xs_backtest_report(label, strat, bench, n_rebal, wr, explain=explain)
+    return {
+        'slug': model.slug,
+        'label': label,
+        'ann_return': strat['ann_return'],
+        'sharpe': strat['sharpe'],
+        'max_dd': strat['max_dd'],
+        'n_trades': n_rebal,
+        'strat': strat,
+        'hold': bench,
+    }

@@ -24,6 +24,10 @@ CLI quick reference
   python cli.py sell TICKER
   python cli.py reset
 
+  # Cross-sectional long/short (multi-stock universe)
+  python cli.py portfolio backtest --universe MU,NVDA,AMD --signal all --years 5
+  python cli.py portfolio ranks --universe MU,NVDA,AMD,TSM --signal momentum
+
 Paper trading only. Data from Yahoo Finance (free, ~15 min delayed).
 """
 

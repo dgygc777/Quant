@@ -12,7 +12,14 @@ import sys
 import time
 from pathlib import Path
 
-from quant.data import build_live_frame, fetch_daily_prices, fetch_historical_prices, fetch_live_quote
+from quant.data import (
+    build_live_frame,
+    fetch_daily_prices,
+    fetch_historical_prices,
+    fetch_live_quote,
+    fetch_panel,
+    parse_universe,
+)
 from quant.portfolio import (
     DEFAULT_CASH,
     DEFAULT_PORTFOLIO,
@@ -24,11 +31,44 @@ from quant.portfolio import (
     save_portfolio,
     set_model_state,
 )
-from quant.registry import get_model, list_models, resolve_models
+from quant.models.cross_sectional import DEFAULT_UNIVERSE
+from quant.registry import get_model, get_panel_model, list_models, list_panel_models, resolve_models
 from quant.report_builder import build_full_report, cli_usage_block
-from quant.reporting import print_model_comparison, run_model_backtest
+from quant.reporting import print_model_comparison, run_model_backtest, run_panel_backtest
 
+DEFAULT_UNIVERSE_STR = ','.join(DEFAULT_UNIVERSE)
 DEFAULT_COST = 0.0005
+
+
+def add_portfolio_params(p: argparse.ArgumentParser) -> None:
+    p.add_argument('--universe', default=DEFAULT_UNIVERSE_STR,
+                   help='Comma-separated tickers (default: semis basket)')
+    p.add_argument('--signal', default='momentum',
+                   choices=['momentum', 'reversal', 'all', 'combo'],
+                   help='Cross-sectional signal (default: momentum)')
+    p.add_argument('--years', type=int, default=5)
+    p.add_argument('--top-frac', type=float, default=0.33,
+                   help='Fraction long / short per leg (default 0.33)')
+    p.add_argument('--rebalance', type=int, default=5,
+                   help='Rebalance every N trading days (default 5)')
+    p.add_argument('--short-window', type=int, default=5,
+                   help='Reversal signal lookback in days (default 5)')
+    p.add_argument('--lookback', type=int, default=126,
+                   help='Momentum signal lookback (default 126)')
+    p.add_argument('--skip', type=int, default=21,
+                   help='Momentum signal skip days (default 21)')
+    p.add_argument('--no-explain', action='store_true')
+
+
+def panel_params_from_args(args) -> dict:
+    return {
+        'mode': args.signal if args.signal not in ('all', 'combo') else 'momentum',
+        'top_frac': args.top_frac,
+        'rebalance': args.rebalance,
+        'short_window': args.short_window,
+        'lookback': args.lookback,
+        'skip': args.skip,
+    }
 
 
 def add_common_args(p: argparse.ArgumentParser) -> None:
@@ -127,10 +167,14 @@ def print_history(portfolio: dict, limit: int = 20) -> None:
 
 
 def cmd_models_list(_args) -> None:
-    print('\nAvailable models:')
+    print('\nSingle-asset models (one ticker):')
     for m in list_models():
-        print(f'  {m.slug:<18} {m.name}')
-        print(f'  {"":18} {m.description}')
+        print(f'  {m.slug:<20} {m.name}')
+        print(f'  {"":20} {m.description}')
+    print('\nPanel models (stock universe):')
+    for m in list_panel_models():
+        print(f'  {m.slug:<20} {m.name}')
+        print(f'  {"":20} {m.description}')
 
 
 def cmd_signal(args) -> None:
@@ -238,6 +282,72 @@ def cmd_watch(args) -> None:
         time.sleep(args.interval)
 
 
+def cmd_portfolio_backtest(args) -> None:
+    universe = parse_universe(args.universe)
+    panel = fetch_panel(universe, args.years)
+    model = get_panel_model()
+    rows = []
+
+    if args.signal in ('momentum', 'reversal'):
+        params = panel_params_from_args(args)
+        params['mode'] = args.signal
+        summary = run_panel_backtest(
+            model, panel, DEFAULT_COST, not args.no_explain, args.years,
+            f'XS {args.signal.title()} — {len(panel.columns)} names ({args.years}y)',
+            **params,
+        )
+        rows.append(summary)
+    elif args.signal == 'combo':
+        params = panel_params_from_args(args)
+        combo_df = model.backtest_combo(panel, cost=DEFAULT_COST, **params)
+        from quant.metrics import metrics
+        from quant.reporting import print_xs_backtest_report, xs_win_rate
+        strat = metrics(combo_df['strat_net'])
+        bench = metrics(combo_df['ret'])
+        n_rebal = int(len(panel) / params['rebalance'])
+        wr = xs_win_rate(combo_df)
+        print_xs_backtest_report(
+            f'XS Combo 50/50 — {len(panel.columns)} names ({args.years}y)',
+            strat, bench, n_rebal, wr, explain=not args.no_explain,
+        )
+        rows.append({
+            'label': 'Combo 50/50', 'ann_return': strat['ann_return'],
+            'sharpe': strat['sharpe'], 'max_dd': strat['max_dd'], 'n_trades': n_rebal,
+        })
+    else:  # all
+        for sig in ('momentum', 'reversal'):
+            params = panel_params_from_args(args)
+            params['mode'] = sig
+            summary = run_panel_backtest(
+                model, panel, DEFAULT_COST, not args.no_explain, args.years,
+                f'XS {sig.title()} — {len(panel.columns)} names ({args.years}y)',
+                **params,
+            )
+            rows.append(summary)
+        if len(rows) > 1:
+            print_model_comparison(rows)
+            bench = rows[0]['hold']
+            print(
+                f'\nEqual-weight universe benchmark: {bench["ann_return"]:+.1%}/yr, '
+                f'Sharpe {bench["sharpe"]:.2f}, max DD {bench["max_dd"]:.1%}'
+            )
+
+
+def cmd_portfolio_ranks(args) -> None:
+    universe = parse_universe(args.universe)
+    panel = fetch_panel(universe, max(2, args.years))
+    model = get_panel_model()
+    params = panel_params_from_args(args)
+    if args.signal in ('all', 'combo'):
+        raise ValueError('ranks requires --signal momentum or reversal')
+    params['mode'] = args.signal
+    weights = model.current_weights(panel, **params)
+    scores = model.current_ranks(panel, **params)
+    print(model.format_ranks(weights, scores, universe, **params))
+    if not getattr(args, 'no_math', False):
+        print(model.explain_math(**params))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description='Quant toolkit: multi-model backtesting and paper trading.',
@@ -303,6 +413,16 @@ def main() -> None:
     p_reset = sub.add_parser('reset', help='Reset paper portfolio')
     add_common_args(p_reset)
 
+    p_port = sub.add_parser('portfolio', help='Cross-sectional multi-stock model')
+    p_port_sub = p_port.add_subparsers(dest='portfolio_cmd', required=True)
+
+    p_port_bt = p_port_sub.add_parser('backtest', help='Backtest long/short universe')
+    add_portfolio_params(p_port_bt)
+
+    p_port_ranks = p_port_sub.add_parser('ranks', help='Current long/short targets')
+    add_portfolio_params(p_port_ranks)
+    p_port_ranks.add_argument('--no-math', action='store_true')
+
     p_help = sub.add_parser('help', help='Show CLI usage')
     p_help.add_argument('topic', nargs='?', default='')
 
@@ -347,6 +467,10 @@ def main() -> None:
             }
             save_portfolio(portfolio, args.portfolio)
             print(f'Portfolio reset to ${DEFAULT_CASH:,.0f} cash.')
+        elif args.command == 'portfolio' and args.portfolio_cmd == 'backtest':
+            cmd_portfolio_backtest(args)
+        elif args.command == 'portfolio' and args.portfolio_cmd == 'ranks':
+            cmd_portfolio_ranks(args)
         elif args.command == 'help':
             print(cli_usage_block())
         else:
