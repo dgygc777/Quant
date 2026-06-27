@@ -3,11 +3,49 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from quant.params import validate_xs_params
+
 from quant.models.panel_base import PanelModel
 from quant.universes import DEFAULT_UNIVERSE, DEFAULT_PRESET, universe_selection_note
 
 # Re-export for backward compatibility.
 DEFAULT_TOP_FRAC = 0.25
+EXTREME_DAILY_RETURN = 0.35
+
+
+def assess_panel_quality(prices: pd.DataFrame) -> dict:
+    """Report stale dates, coverage, and suspicious one-day moves."""
+    rets = prices.pct_change(fill_method=None)
+    latest = prices.index[-1] if len(prices.index) else None
+    excluded: list[tuple[str, str]] = []
+    coverage: dict[str, float] = {}
+    for col in prices.columns:
+        s = prices[col].dropna()
+        coverage[col] = len(s) / max(len(prices), 1)
+        if s.empty:
+            excluded.append((col, 'no data'))
+            continue
+        if s.index[-1] < latest:
+            excluded.append((col, f'stale last bar {s.index[-1].date()}'))
+        col_rets = rets[col].dropna()
+        if (col_rets.abs() > EXTREME_DAILY_RETURN).any():
+            excluded.append((col, 'extreme daily return (>35%)'))
+    min_cov = min(coverage.values()) if coverage else 0.0
+    return {
+        'latest_date': latest,
+        'coverage': coverage,
+        'min_coverage': min_cov,
+        'excluded': excluded,
+    }
+
+
+def print_panel_quality(report: dict) -> None:
+    if report['excluded']:
+        print('Panel data-quality notes:')
+        for ticker, reason in report['excluded']:
+            print(f'  {ticker}: {reason}')
+    print(f'Latest panel date: {report["latest_date"]}')
+    print(f'Min ticker coverage: {report["min_coverage"]:.1%}')
 
 
 def simulate_panel(tickers, n_days=1500, seed=1, annual_idvol=0.25,
@@ -31,34 +69,47 @@ def simulate_panel(tickers, n_days=1500, seed=1, annual_idvol=0.25,
     return pd.DataFrame(cols)
 
 
-def compute_scores(prices: pd.DataFrame, mode: str = 'momentum',
-                   lookback: int = 126, skip: int = 21, short_window: int = 5) -> pd.DataFrame:
+def compute_scores(
+    prices: pd.DataFrame,
+    mode: str = 'momentum',
+    lookback: int = 126,
+    skip: int = 21,
+    short_window: int = 5,
+    score_mode: str = 'raw_momentum',
+) -> pd.DataFrame:
     """Cross-sectional score per name.
 
-    Momentum:
-        score[t, i] = price[t-skip, i] / price[t-skip-lookback, i] - 1
-        lookback: return window length. skip: ignore most recent days (0 = use price[t]).
-
-    Reversal:
-        score[t, i] = -(price[t, i] / price[t-short_window, i] - 1)
+    score_mode:
+      raw_momentum — price return over lookback/skip (default)
+      risk_adjusted_momentum — return / realized vol
+      multi_horizon_composite — average percentile rank across 20d, 63d, 126d skip-21
     """
     if mode == 'momentum':
-        return prices.shift(skip) / prices.shift(skip + lookback) - 1.0
+        validate_xs_params(top_frac=0.25, rebalance=1, lookback=lookback, skip=skip)
+        if score_mode == 'raw_momentum':
+            return prices.shift(skip) / prices.shift(skip + lookback) - 1.0
+        if score_mode == 'risk_adjusted_momentum':
+            ret = prices.shift(skip) / prices.shift(skip + lookback) - 1.0
+            vol = prices.pct_change(fill_method=None).rolling(lookback, min_periods=max(5, lookback // 3)).std()
+            return ret / vol.replace(0, np.nan)
+        if score_mode == 'multi_horizon_composite':
+            horizons = [(20, 0), (63, 0), (126, 21)]
+            ranks = []
+            for lb, sk in horizons:
+                raw = prices.shift(sk) / prices.shift(sk + lb) - 1.0
+                ranks.append(raw.rank(axis=1, pct=True))
+            return sum(ranks) / len(ranks)
+        raise ValueError(f'unknown score_mode: {score_mode}')
     if mode == 'reversal':
+        validate_xs_params(top_frac=0.25, rebalance=1, short_window=short_window)
         return -(prices / prices.shift(short_window) - 1.0)
     raise ValueError(f'unknown mode: {mode}')
 
 
 def build_weights(prices: pd.DataFrame, scores: pd.DataFrame, top_frac: float = 0.33,
                   rebalance: int = 5, market_neutral: bool = True) -> pd.DataFrame:
-    """Build daily target weights with periodic rebalance.
-
-    Top k names receive +1/k (long leg).
-    Bottom k receive -1/k if market_neutral (short leg); else 0.
-    Middle names receive 0.
-
-    Weights decided at close t are held until the next rebalance.
-    """
+    """Build daily target weights with periodic rebalance."""
+    validate_xs_params(top_frac=top_frac, rebalance=rebalance)
     n = prices.shape[1]
     k = max(1, int(round(top_frac * n)))
     rebal_days = set(range(0, len(prices), rebalance))
@@ -110,6 +161,13 @@ def portfolio_returns(weights: pd.DataFrame, rets: pd.DataFrame,
 def backtest_xs(prices: pd.DataFrame, mode: str = 'momentum', top_frac: float = 0.33,
                 rebalance: int = 5, cost: float = 0.0005, market_neutral: bool = True,
                 **sig_kw) -> pd.DataFrame:
+    validate_xs_params(
+        top_frac=top_frac,
+        rebalance=rebalance,
+        lookback=sig_kw.get('lookback'),
+        skip=sig_kw.get('skip'),
+        short_window=sig_kw.get('short_window'),
+    )
     rets = prices.pct_change(fill_method=None)
     scores = compute_scores(prices, mode=mode, **sig_kw)
     weights = build_weights(prices, scores, top_frac, rebalance, market_neutral)

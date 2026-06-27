@@ -20,8 +20,6 @@ for return[t] (cost aligns with shifted execution).
 
 from __future__ import annotations
 
-import json
-import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -35,34 +33,10 @@ from quant.models.cross_sectional import (
 )
 from quant.models.mean_reversion import MeanReversionModel
 from quant.models.momentum import MomentumModel
+from quant.table_format import print_table
+from quant.tenk_cache import load_tenk_scores
 
-RISK_FLAG_THRESHOLD = -0.30
-
-
-def load_tenk_scores(path: str = "tenk_cache.json") -> dict[str, float | None]:
-    """Return {TICKER: change_score} from the 10-K cache, newest filing per ticker.
-
-    Cache keys are 'TICKER:filing_date'; values are dicts with 'change_score'.
-    """
-    out: dict[str, float | None] = {}
-    if not os.path.exists(path):
-        return out
-    try:
-        with open(path, encoding="utf-8") as f:
-            cache = json.load(f)
-    except Exception:
-        return out
-    by_ticker: dict[str, tuple[str, float | None]] = {}
-    for key, val in cache.items():
-        if ":" not in key:
-            continue
-        tkr, date = key.split(":", 1)
-        tkr = tkr.upper()
-        score = val.get("change_score") if isinstance(val, dict) else None
-        prev = by_ticker.get(tkr)
-        if prev is None or date > prev[0]:
-            by_ticker[tkr] = (date, score)
-    return {t: s for t, (_, s) in by_ticker.items()}
+DEFAULT_RISK_FLAG_THRESHOLD = -0.30
 
 
 @dataclass
@@ -196,39 +170,87 @@ def build_combined_snapshot_df(panel: pd.DataFrame, xs_weights: pd.Series,
     return pd.DataFrame(rows).sort_values('xs_score', ascending=False, na_position='last')
 
 
-def print_combined_signal_report(df: pd.DataFrame, p: CombinedParams) -> None:
-    tenk = load_tenk_scores()
+def attach_tenk_metadata(
+    df: pd.DataFrame,
+    *,
+    cache_path: str = 'tenk_cache.json',
+    risk_threshold: float = DEFAULT_RISK_FLAG_THRESHOLD,
+) -> pd.DataFrame:
+    """Add tenk_score, filing metadata, and risk_flag columns from cache."""
+    tenk = load_tenk_scores(cache_path)
+    out = df.copy()
+    scores: list[float | None] = []
+    filing_dates: list[str | None] = []
+    tenk_ok: list[bool] = []
+    risk_flags: list[bool] = []
+    for _, row in out.iterrows():
+        entry = tenk.get(str(row['ticker']).upper())
+        score = entry.change_score if entry else None
+        scores.append(score)
+        filing_dates.append(entry.filing_date.isoformat() if entry and entry.filing_date else None)
+        tenk_ok.append(bool(entry and entry.ok and score is not None))
+        risk_flags.append(
+            row['final_action'] == 'BUY'
+            and score is not None
+            and score <= risk_threshold
+        )
+    out['tenk_score'] = scores
+    out['tenk_filing_date'] = filing_dates
+    out['tenk_ok'] = tenk_ok
+    out['risk_flag'] = risk_flags
+    return out
+
+
+def print_combined_signal_report(
+    df: pd.DataFrame,
+    p: CombinedParams,
+    *,
+    cache_path: str = 'tenk_cache.json',
+    risk_threshold: float = DEFAULT_RISK_FLAG_THRESHOLD,
+) -> None:
+    df = attach_tenk_metadata(df, cache_path=cache_path, risk_threshold=risk_threshold)
     print('\n=== Combined Signal Report ===')
     if p.long_only_mode:
         print('Long-only mode: short leg is treated as avoid/underweight, not actual short positions.')
-    buys = df[df['final_action'] == 'BUY']['ticker'].tolist()
-    if buys:
-        print(f'Actionable BUY candidates ({len(buys)}): {", ".join(buys)}')
-    print()
-    print(f'{"Ticker":<7}{"XS":<6}{"XS score":>9}{"Price":>10}{"Z":>7}'
-          f'{"MR":>5}{"Mom preset":<12}{"Mom score":>10}{"Mom sig":>8}{"10KΔ":>7}{"Final":>14}{"  Reason"}')
-    print('-' * 128)
+
+    clean_buys = df[(df['final_action'] == 'BUY') & ~df['risk_flag']]['ticker'].tolist()
+    conflict_buys = df[df['risk_flag']]['ticker'].tolist()
+    if clean_buys:
+        print(f'Actionable BUY candidates ({len(clean_buys)}): {", ".join(clean_buys)}')
+    if conflict_buys:
+        print(f'BUY candidates with filing-risk conflict ({len(conflict_buys)}): {", ".join(conflict_buys)}')
+
+    headers = [
+        'Ticker', 'XS', 'XS score', 'Price', 'Z', 'MR', 'Mom preset', 'Mom score',
+        'Mom sig', '10KΔ', 'Final', 'Reason',
+    ]
+    rows: list[list[str]] = []
     for _, r in df.iterrows():
-        reason_short = r['reason'] if len(r['reason']) <= 38 else r['reason'][:35] + '...'
-        mom_preset = r.get('momentum_preset', 'mom_126d_skip21')
-        score = tenk.get(str(r['ticker']).upper())
+        score = r.get('tenk_score')
         if isinstance(score, (int, float)) and score is not None and not pd.isna(score):
             tenk_cell = f'{float(score):+.2f}'
         else:
-            tenk_cell = '  —  '
+            tenk_cell = '—'
         final = str(r['final_action'])
-        if (
-            final == 'BUY'
-            and isinstance(score, (int, float))
-            and score is not None
-            and not pd.isna(score)
-            and float(score) <= RISK_FLAG_THRESHOLD
-        ):
+        if r.get('risk_flag'):
             final = f'{final} ⚠RISK↑'
-        print(f'{r["ticker"]:<7}{r["xs_leg"]:<6}{r["xs_score"]:>+8.1%}'
-              f'{r["price"]:>10.2f}{r["z"]:>+7.2f}'
-              f'{r["mr_signal"]:>5}{mom_preset:<12}{r["momentum"]:>+9.1%}'
-              f'{r["mom_signal"]:>8}{tenk_cell:>7}{final:>14}  {reason_short}')
+        reason_short = r['reason'] if len(r['reason']) <= 38 else r['reason'][:35] + '...'
+        rows.append([
+            str(r['ticker']),
+            str(r['xs_leg']),
+            f"{r['xs_score']:+.1%}",
+            f"{r['price']:.2f}",
+            f"{r['z']:+.2f}",
+            str(r['mr_signal']),
+            str(r.get('momentum_preset', 'mom_126d_skip21')),
+            f"{r['momentum']:+.1%}",
+            str(r['mom_signal']),
+            tenk_cell,
+            final,
+            reason_short,
+        ])
+    print()
+    print_table(headers, rows)
     print()
     print(
         '10KΔ = YoY risk-language change (cached); ⚠RISK↑ = BUY signal conflicts with '
@@ -372,6 +394,16 @@ def run_strategy_comparison(
         'corr_bench': 1.0,
         'n_rebalances': 0,
         'avg_holdings': float(panel.shape[1]),
+    }, {
+        'label': 'Cash / zero benchmark',
+        'ann_return': 0.0,
+        'ann_vol': 0.0,
+        'sharpe': 0.0,
+        'max_dd': 0.0,
+        'turnover': 0.0,
+        'corr_bench': 0.0,
+        'n_rebalances': 0,
+        'avg_holdings': 0.0,
     }]
 
     xs_lo = backtest_xs_long_only(panel, xs_params, cost)
@@ -411,7 +443,7 @@ def print_strategy_comparison(rows: list[dict]) -> None:
               f'{r["sharpe"]:>8.2f}{r["max_dd"]:>8.1%}'
               f'{r["turnover"]:>10.4f}{r["corr_bench"]:>11.2f}{ah_s}')
 
-    strat_rows = [r for r in rows if r['label'] != 'Equal-weight benchmark']
+    strat_rows = [r for r in rows if 'benchmark' not in r['label'].lower()]
     if not strat_rows:
         return
     best_ret = max(strat_rows, key=lambda x: x['ann_return'])

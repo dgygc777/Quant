@@ -196,6 +196,8 @@ def resolve_universe(universe: str = DEFAULT_PRESET,
 
 def validate_universe_size(tickers: list[str], top_frac: float) -> None:
     """Ensure enough names for long + short legs: n >= 2*k, k = round(top_frac * n)."""
+    from quant.params import validate_top_frac
+    validate_top_frac(top_frac)
     n = len(tickers)
     if n < 2:
         raise ValueError('Cross-sectional model needs at least 2 tickers.')

@@ -39,6 +39,8 @@ from quant.combined_signal import (
     print_strategy_comparison,
     run_strategy_comparison,
 )
+from quant.models.cross_sectional import assess_panel_quality, print_panel_quality
+from quant.params import validate_xs_params
 from quant.models.cross_sectional import DEFAULT_TOP_FRAC
 from quant.registry import get_model, get_panel_model, list_models, list_panel_models, resolve_models
 from quant.report_builder import build_full_report, cli_usage_block
@@ -70,6 +72,12 @@ DEFAULT_COST = 0.0005
 
 def resolve_portfolio_universe(args) -> tuple[str, list[str]]:
     preset, tickers = resolve_universe(args.universe, getattr(args, 'tickers', None))
+    validate_xs_params(
+        top_frac=args.top_frac,
+        rebalance=args.rebalance,
+        short_window=args.short_window,
+        years=args.years,
+    )
     validate_universe_size(tickers, args.top_frac)
     return preset, tickers
 
@@ -110,6 +118,12 @@ def add_portfolio_params(p: argparse.ArgumentParser) -> None:
                    help='Combined: label SHORT_CANDIDATE (research only)')
     p.add_argument('--no-long-only', action='store_true',
                    help='Disable long-only interpretation of short leg')
+    p.add_argument('--risk-threshold', type=float, default=-0.30,
+                   help='10KΔ flag threshold for BUY conflicts (default -0.30)')
+    p.add_argument('--tenk-cache', default='tenk_cache.json',
+                   help='Path to tenk_reader cache JSON')
+    p.add_argument('--validate', action='store_true',
+                   help='Append lightweight walk-forward OOS summary (compare only)')
 
 
 def combined_params_from_args(args) -> CombinedParams:
@@ -370,14 +384,35 @@ def _print_single_stock_backtests(panel, weights, xs_scores, years, cost, skip: 
 def _print_single_stock_snapshots(panel, weights, xs_scores, skip: bool,
                                   combined: CombinedParams,
                                   mom_params: dict | None = None,
-                                  momentum_preset: str = 'mom_126d_skip21') -> None:
+                                  momentum_preset: str = 'mom_126d_skip21',
+                                  risk_threshold: float = -0.30,
+                                  tenk_cache: str = 'tenk_cache.json') -> None:
     if skip:
         return
     df = build_combined_snapshot_df(
         panel, weights, xs_scores, combined,
         mom_params=mom_params, momentum_preset=momentum_preset,
     )
-    print_combined_signal_report(df, combined)
+    print_combined_signal_report(
+        df, combined, cache_path=tenk_cache, risk_threshold=risk_threshold,
+    )
+
+
+def _print_wf_validation(panel: pd.DataFrame, train: int = 504, test: int = 63) -> None:
+    from validate_cross_sectional import GRID, WARMUP, report_panel_validation
+    print('\n=== Walk-forward validation (same universe / XS rules) ===')
+    print('Full fold detail: python3 validate_cross_sectional.py --universe <preset>')
+    if len(panel) < train + test:
+        print(f'Panel too short for WF ({len(panel)} bars; need {train + test}).')
+        return
+    report_panel_validation(
+        'Portfolio compare WF',
+        panel,
+        GRID,
+        train=train,
+        test=test,
+        warmup=WARMUP,
+    )
 
 
 def cmd_portfolio_universes(_args) -> None:
@@ -387,12 +422,17 @@ def cmd_portfolio_universes(_args) -> None:
 def cmd_portfolio_compare(args) -> None:
     preset, universe = resolve_portfolio_universe(args)
     panel = fetch_panel(universe, args.years)
+    quality = assess_panel_quality(panel)
+    print_panel_quality(quality)
     xs_params = panel_params_from_args(args)
     xs_params['mode'] = 'momentum'
     validate_momentum_params(xs_params['lookback'], xs_params['skip'], n_days=len(panel))
     combined = combined_params_from_args(args)
     rows = run_strategy_comparison(panel, xs_params, combined, DEFAULT_COST)
     print_strategy_comparison(rows)
+    print('\nBenchmark note: equal-weight is the universe basket; cash/zero is shown for L/S context.')
+    if getattr(args, 'validate', False):
+        _print_wf_validation(panel)
     if not args.no_single_stock:
         model = get_panel_model()
         weights = model.current_weights(panel, **xs_params)
@@ -401,6 +441,8 @@ def cmd_portfolio_compare(args) -> None:
             panel, weights, scores, False, combined,
             mom_params=mom_params_from_panel(xs_params),
             momentum_preset=xs_params['momentum_preset'],
+            risk_threshold=args.risk_threshold,
+            tenk_cache=args.tenk_cache,
         )
     print(f'\nUniverse preset: {preset} — {describe_preset(preset)}')
 
@@ -478,6 +520,8 @@ def cmd_portfolio_backtest(args) -> None:
             panel, xs_weights, xs_scores, False, combined,
             mom_params=mom_params_from_panel(xs_params),
             momentum_preset=xs_params['momentum_preset'],
+            risk_threshold=args.risk_threshold,
+            tenk_cache=args.tenk_cache,
         )
 
 
@@ -496,6 +540,7 @@ def cmd_portfolio_momentum_compare(args) -> None:
 def cmd_portfolio_ranks(args) -> None:
     preset, universe = resolve_portfolio_universe(args)
     panel = fetch_panel(universe, max(2, args.years))
+    print_panel_quality(assess_panel_quality(panel))
     params = panel_params_from_args(args)
     validate_momentum_params(params['lookback'], params['skip'], n_days=len(panel))
 
@@ -519,6 +564,8 @@ def cmd_portfolio_ranks(args) -> None:
             panel, weights, scores, False, combined,
             mom_params=mom_params_from_panel(params),
             momentum_preset=params['momentum_preset'],
+            risk_threshold=args.risk_threshold,
+            tenk_cache=args.tenk_cache,
         )
     if not getattr(args, 'no_math', False):
         print(model.explain_math(**params))
