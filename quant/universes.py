@@ -84,6 +84,26 @@ UNIVERSE_PRESETS: dict[str, list[str]] = {
     ],
 }
 
+# Pool for ranking NASDAQ names by live market cap (dedupe GOOG → GOOGL).
+NASDAQ_TOP30_CANDIDATES: list[str] = [
+    'AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'AVGO', 'TSLA', 'NFLX',
+    'COST', 'AMD', 'PEP', 'CSCO', 'ADBE', 'QCOM', 'TXN', 'INTU', 'AMAT', 'ISRG',
+    'BKNG', 'ARM', 'PANW', 'ADP', 'MU', 'LRCX', 'KLAC', 'SNPS', 'CDNS', 'REGN',
+    'ASML', 'MELI', 'MAR', 'SBUX', 'ABNB', 'CRWD', 'FTNT', 'DXCM', 'MNST', 'ADSK',
+    'PYPL', 'CHTR', 'CMCSA', 'GILD', 'HON', 'PDD', 'MRVL', 'LULU', 'WDAY', 'ORLY',
+    'CTAS', 'PCAR', 'NXPI', 'MCHP', 'ON', 'TTD', 'ZS', 'DDOG', 'TEAM', 'IDXX',
+]
+
+# Static fallback — largest NASDAQ-listed names by market cap (approx. early 2026).
+NASDAQ_TOP30_FALLBACK: list[str] = [
+    'NVDA', 'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'AVGO', 'TSLA', 'NFLX',
+    'COST', 'AMD', 'PEP', 'CSCO', 'ADBE', 'QCOM', 'TXN', 'INTU', 'AMAT', 'ISRG',
+    'BKNG', 'ARM', 'PANW', 'ADP', 'MU', 'LRCX', 'KLAC', 'SNPS', 'CDNS', 'REGN',
+    'ASML',
+]
+
+UNIVERSE_PRESETS['nasdaq_top30'] = list(NASDAQ_TOP30_FALLBACK)
+
 # Backward compatibility for code that imports DEFAULT_UNIVERSE.
 DEFAULT_UNIVERSE = UNIVERSE_PRESETS[DEFAULT_PRESET]
 
@@ -101,6 +121,7 @@ UNIVERSE_DESCRIPTIONS: dict[str, str] = {
     'mega_cap_tech': 'Which mega-cap tech names are strongest relative to other mega-cap tech names?',
     'ai_infra': 'Which AI infrastructure names are strongest relative to the AI infrastructure basket?',
     'broad_tech': 'Which broad tech names rank highest within a diversified tech basket?',
+    'nasdaq_top30': 'Largest ~30 NASDAQ-listed names by market cap (10-K risk-change scan).',
     'custom': 'Custom ticker list supplied by the user.',
 }
 
@@ -109,8 +130,41 @@ def available_universes() -> list[str]:
     return sorted(UNIVERSE_PRESETS.keys())
 
 
+def resolve_nasdaq_top30(live: bool = True) -> list[str]:
+    """Return ~30 largest NASDAQ-listed names by market cap."""
+    if live:
+        try:
+            import yfinance as yf
+
+            caps: list[tuple[str, float]] = []
+            for ticker in NASDAQ_TOP30_CANDIDATES:
+                try:
+                    info = yf.Ticker(ticker).fast_info
+                    cap = info.get("market_cap") if hasattr(info, "get") else getattr(info, "market_cap", None)
+                    if cap and cap > 0:
+                        caps.append((ticker.upper(), float(cap)))
+                except Exception:
+                    continue
+            if len(caps) >= 30:
+                caps.sort(key=lambda x: x[1], reverse=True)
+                out: list[str] = []
+                for ticker, _ in caps:
+                    if ticker == "GOOG":
+                        ticker = "GOOGL"
+                    if ticker not in out:
+                        out.append(ticker)
+                    if len(out) >= 30:
+                        break
+                return out
+        except Exception:
+            pass
+    return list(NASDAQ_TOP30_FALLBACK)
+
+
 def get_universe(name: str) -> list[str]:
     key = name.lower().replace('-', '_')
+    if key == 'nasdaq_top30':
+        return resolve_nasdaq_top30()
     if key not in UNIVERSE_PRESETS:
         avail = ', '.join(available_universes())
         raise ValueError(f'Unknown universe: {name}\nAvailable universes: {avail}')
