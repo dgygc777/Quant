@@ -21,7 +21,7 @@ import pandas as pd
 from quant.metrics import metrics
 from quant.models.momentum import MomentumModel
 
-DEFAULT_MOMENTUM_PRESET = 'mom_126d_skip21'
+DEFAULT_MOMENTUM_PRESET = 'mom_10d'
 
 MOMENTUM_PRESETS: dict[str, dict] = {
     'mom_10d': {
@@ -107,7 +107,7 @@ def resolve_momentum_params(
     """Return (preset_label, lookback, skip).
 
     Preset supplies defaults; explicit lookback/skip override preset values.
-    When nothing is specified, uses DEFAULT_MOMENTUM_PRESET (126d / skip 21).
+    When nothing is specified, uses DEFAULT_MOMENTUM_PRESET (10d).
     """
     if momentum_preset is not None:
         p = get_momentum_preset(momentum_preset)
