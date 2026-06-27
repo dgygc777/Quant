@@ -17,6 +17,37 @@ UNIVERSE_PRESETS: dict[str, list[str]] = {
     'semis': [
         'MU', 'SNDK', 'NVDA', 'AMD', 'AVGO', 'QCOM', 'TSM',
         'ASX', 'AMAT', 'LRCX', 'KLAC', 'INTC', 'ASML', 'MRVL',
+        'TXN', 'SNPS', 'CDNS', 'ARM', 'GFS', 'AMKR', 'TER', 'COHR',
+    ],
+
+    # EDA and semiconductor IP / design tools
+    'eda_ip': [
+        'SNPS', 'CDNS', 'ARM',
+    ],
+
+    # Analog, mixed-signal, and power semiconductors
+    'analog_power': [
+        'TXN', 'ADI', 'NXPI', 'MCHP', 'ON', 'MPWR', 'STM',
+    ],
+
+    # Foundry and integrated-device manufacturing
+    'foundry': [
+        'TSM', 'GFS', 'UMC', 'INTC',
+    ],
+
+    # Semiconductor equipment (wafer-fab tools and related)
+    'equipment': [
+        'AMAT', 'LRCX', 'KLAC', 'ASML', 'TER', 'ONTO', 'KLIC', 'ACLS', 'ENTG',
+    ],
+
+    # AI connectivity: networking, optical, and high-speed interconnect
+    'ai_connectivity': [
+        'ALAB', 'CRDO', 'MRVL', 'AVGO', 'COHR',
+    ],
+
+    # Outsourced semiconductor assembly and test (OSAT) / packaging
+    'osat': [
+        'ASX', 'AMKR',
     ],
 
     # Semiconductor equipment / wafer-fab tool makers
@@ -58,6 +89,12 @@ DEFAULT_UNIVERSE = UNIVERSE_PRESETS[DEFAULT_PRESET]
 
 UNIVERSE_DESCRIPTIONS: dict[str, str] = {
     'semis': 'Which semiconductor names are strongest relative to other semiconductor names?',
+    'eda_ip': 'Which EDA/IP names lead vs other design-tool peers?',
+    'analog_power': 'Which analog/power names lead vs peers?',
+    'foundry': 'Which foundry/IDM names lead vs other foundries?',
+    'equipment': 'Which semi-equipment names lead vs equipment peers?',
+    'ai_connectivity': 'Which AI-connectivity names lead vs peers?',
+    'osat': 'Which packaging/OSAT names lead vs peers?',
     'semi_equipment': 'Which semi equipment names lead vs other equipment peers?',
     'memory_storage': 'Which memory and storage names lead vs other memory/storage peers?',
     'foundry_packaging': 'Which foundry/packaging names lead vs other manufacturing peers?',

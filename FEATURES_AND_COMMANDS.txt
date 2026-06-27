@@ -25,6 +25,7 @@ This project is a Python quant research toolkit with:
   • Combined decision layer — merge cross-sectional selection with single-stock timing
   • Paper trading           — simulate buys/sells in a local JSON portfolio
   • Backtesting             — historical performance with metrics and explanations
+  • Walk-forward validation — honest out-of-sample parameter checks (quant/validation.py)
   • Universe presets        — named stock baskets for cleaner cross-sectional research
 
 Typical workflow:
@@ -68,8 +69,8 @@ quant/
   portfolio.py                  Paper portfolio JSON persistence
   registry.py                   Model registry
   universes.py                  Named universe presets + helpers
-  universes.py                  Named universe presets + helpers
   momentum_presets.py           Named momentum lookback presets + comparisons
+  validation.py                 Walk-forward validation (overfitting check)
   combined_signal.py            XS + MR + momentum decision layer
   universe_analysis.py          Per-stock snapshots and backtests in a panel
   models/
@@ -78,6 +79,11 @@ quant/
     mean_reversion.py           Z-score mean reversion
     momentum.py                 Time-series momentum (vol-targeted)
     cross_sectional.py          Cross-sectional long/short ranking
+
+Standalone scripts (project root):
+
+  validate_momentum.py          Walk-forward momentum validation (real data)
+  validate_mean_reversion.py    Walk-forward mean-reversion validation (real data)
 
 Standalone educational demos (synthetic data, optional plots):
 
@@ -559,6 +565,49 @@ Examples:
   python3 cli.py stock momentum-compare MU --years 3
 
 
+--------------------------------------------------------------------------------
+10.2 validate_momentum.py — walk-forward momentum validation (real data)
+--------------------------------------------------------------------------------
+
+  python3 validate_momentum.py TICKER [TICKER ...] [--years N] [--train N] [--test N] [--warmup N]
+
+Fetches real Yahoo Finance history per ticker, grids over lookback/skip/target_vol,
+and prints naive full-history Sharpe vs walk-forward out-of-sample Sharpe.
+
+Default parameter grid (GRID):
+  lookback: [63, 126, 252]   skip: [0, 21]   target_vol: [0.10, 0.15, 0.20]
+
+Defaults: --years 10, --train 504, --test 63, --warmup auto (376 bars from grid).
+
+Trust the "Walk-forward, OUT-OF-SAMPLE" row. train should exceed warmup (376);
+use --train 756 when you have enough history.
+
+Examples:
+  python3 validate_momentum.py NVDA
+  python3 validate_momentum.py NVDA AMD MU --years 10
+  python3 validate_momentum.py MU --years 5 --train 756 --test 63
+
+Synthetic demo only (no real ticker):
+  python3 quant/validation.py
+
+
+--------------------------------------------------------------------------------
+10.3 validate_mean_reversion.py — walk-forward MR validation (real data)
+--------------------------------------------------------------------------------
+
+  python3 validate_mean_reversion.py TICKER [--years N] [--train N] [--test N] [--warmup N]
+
+Same walk-forward framework for mean reversion on real data.
+
+Default parameter grid:
+  window: [10, 20, 30, 50]   entry_z: [-0.5, -1.0, -1.5, -2.0]
+
+Examples:
+  python3 validate_mean_reversion.py MU
+  python3 validate_mean_reversion.py NVDA --years 10
+  python3 validate_mean_reversion.py AAPL --years 5
+
+
 ================================================================================
 11. STANDALONE DEMO SCRIPTS (SYNTHETIC DATA)
 ================================================================================
@@ -656,6 +705,12 @@ python3 cli.py portfolio ranks --tickers MU,NVDA,AMD,AVGO,TSM,ASML
 python3 cli.py portfolio momentum-compare --universe semis --years 5
 python3 cli.py stock momentum-compare NVDA --years 5
 python3 cli.py portfolio ranks --signal momentum --compare-momentum-presets
+
+# Walk-forward validation (honest OOS Sharpe vs overfit baseline)
+python3 validate_momentum.py NVDA
+python3 validate_momentum.py AMD --years 10
+python3 validate_mean_reversion.py MU
+python3 validate_mean_reversion.py NVDA --years 5
 
 # Paper trading
 python3 cli.py run MU --model mean-reversion
