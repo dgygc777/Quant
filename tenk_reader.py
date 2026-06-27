@@ -73,6 +73,24 @@ _20F_START_PATTERNS = [
 ]
 _TOC_LINE = re.compile(r"risk\s*factors\s{4,}\d{1,4}\b", re.IGNORECASE)
 _MIN_SLICE = 200  # skip TOC-sized slices ending at the next Item marker
+_HEAD_WINDOW = 1_200
+_RISK_HEADING = re.compile(
+    r"(?:(?:^|\n|\r|[>\s])(?:item\s+1a\.?|item\s+3\.?\s*(?:key\s+information)?\s*[—\-:–]?\s*d\.?)\s*)?"
+    r"(?:risk\s*factors|principal\s*risks)\b",
+    re.IGNORECASE,
+)
+_RISK_FACTORS_HEADING = re.compile(
+    r"(?:(?:^|\n|\r|[>\s])(?:item\s+1a\.?|item\s+3\.?\s*(?:key\s+information)?\s*[—\-:–]?\s*d\.?)\s*)?"
+    r"risk\s*factors\b",
+    re.IGNORECASE,
+)
+_PRINCIPAL_RISKS_HEADING = re.compile(r"\bprincipal\s*risks\b", re.IGNORECASE)
+_FORWARD_LOOKING_REJECT = re.compile(
+    r"(?:forward-looking|forward looking)\s+statements|"
+    r"special\s+note\s+regarding\s+forward-looking|"
+    r"cautionary\s+statement",
+    re.IGNORECASE,
+)
 
 
 def _resolve_tickers(tickers: list[str], universe: str | None) -> list[str]:
@@ -194,6 +212,62 @@ def _is_toc_slice(section: str) -> bool:
     return False
 
 
+def _candidate_score(section: str, start_pos: int, form_key: str) -> float:
+    """Higher score means the slice is more likely to be the real risk section."""
+    if not section or _is_toc_slice(section):
+        return -1_000_000.0
+
+    head = section[:_HEAD_WINDOW]
+    head_low = head.lower()
+    score = float(min(len(section), RISK_CAP)) / 1_000.0
+
+    cue_count = risk_cue_count(section)
+    cue_density = cue_count / max(len(section), 1) * 10_000
+    score += min(cue_count, 80) * 4.0
+    score += min(cue_density, 35.0) * 6.0
+
+    if _RISK_FACTORS_HEADING.search(head):
+        score += 360.0
+    elif _PRINCIPAL_RISKS_HEADING.search(head):
+        score += 60.0
+    elif _RISK_HEADING.search(head):
+        score += 120.0
+    if re.match(r"\s*Risk\s+factors\b", head):
+        score += 140.0
+    if re.match(r"\s*risk\s+factors\b", head):
+        score -= 260.0
+    if re.search(r"\bd\.\s*risk\s*factors\b", head, re.IGNORECASE):
+        score += 200.0
+    if re.search(
+        r"\brisk\s+factors\s+(?:should\s+be\s+considered|our\s+business\s+is\s+subject|we\s+wish\s+to\s+caution)",
+        head,
+        re.IGNORECASE,
+    ):
+        score += 120.0
+    if form_key == "20-F" and re.search(r"\bitem\s+3\.?\s+key\s+information\b", head, re.IGNORECASE):
+        score += 40.0
+
+    if _FORWARD_LOOKING_REJECT.search(head):
+        score -= 350.0
+    if re.search(r"\bsee\s+[\"'“]?item\s+[13]\b", head_low):
+        score -= 180.0
+    if re.match(r"\s*risk\s+factors\s+related\s+to\b", head):
+        score -= 320.0
+    if re.search(r"\bfor\s+a\s+discussion\s+of\s+the\s+risk\s+related\s+to\b", head_low):
+        score -= 220.0
+    if re.search(r"\btable\s+of\s+contents\b", head_low):
+        score -= 200.0
+    if re.search(r"\bprincipal\s+risks\s+and\s+opportunities\b", head_low):
+        score -= 280.0
+    if re.search(r"\bsustainability|esg\s+committee|governance\b", head_low):
+        score -= 120.0
+    if cue_count < 15:
+        score -= 300.0
+
+    score += min(start_pos / max(RISK_CAP, 1), 20.0)
+    return score
+
+
 def extract_risk_section(text: str, form: str = "10-K") -> str:
     if not text:
         return ""
@@ -209,15 +283,16 @@ def extract_risk_section(text: str, form: str = "10-K") -> str:
     low = text.lower()
     starts = _find_starts(text, start_patterns)
     best = ""
+    best_score = -1_000_000.0
     for st in starts:
         ends = [low.find(mk, st + 50) for mk in end_markers]
         ends = [e for e in ends if e != -1]
         end = min(ends) if ends else st + RISK_CAP
         chunk = text[st:end][:RISK_CAP]
-        if _is_toc_slice(chunk):
-            continue
-        if len(chunk) > len(best):
+        score = _candidate_score(chunk, st, form_key)
+        if score > best_score:
             best = chunk
+            best_score = score
 
     if not best:
         mid = len(text) // 2

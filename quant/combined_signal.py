@@ -20,6 +20,8 @@ for return[t] (cost aligns with shifted execution).
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -33,6 +35,34 @@ from quant.models.cross_sectional import (
 )
 from quant.models.mean_reversion import MeanReversionModel
 from quant.models.momentum import MomentumModel
+
+RISK_FLAG_THRESHOLD = -0.30
+
+
+def load_tenk_scores(path: str = "tenk_cache.json") -> dict[str, float | None]:
+    """Return {TICKER: change_score} from the 10-K cache, newest filing per ticker.
+
+    Cache keys are 'TICKER:filing_date'; values are dicts with 'change_score'.
+    """
+    out: dict[str, float | None] = {}
+    if not os.path.exists(path):
+        return out
+    try:
+        with open(path, encoding="utf-8") as f:
+            cache = json.load(f)
+    except Exception:
+        return out
+    by_ticker: dict[str, tuple[str, float | None]] = {}
+    for key, val in cache.items():
+        if ":" not in key:
+            continue
+        tkr, date = key.split(":", 1)
+        tkr = tkr.upper()
+        score = val.get("change_score") if isinstance(val, dict) else None
+        prev = by_ticker.get(tkr)
+        if prev is None or date > prev[0]:
+            by_ticker[tkr] = (date, score)
+    return {t: s for t, (_, s) in by_ticker.items()}
 
 
 @dataclass
@@ -167,6 +197,7 @@ def build_combined_snapshot_df(panel: pd.DataFrame, xs_weights: pd.Series,
 
 
 def print_combined_signal_report(df: pd.DataFrame, p: CombinedParams) -> None:
+    tenk = load_tenk_scores()
     print('\n=== Combined Signal Report ===')
     if p.long_only_mode:
         print('Long-only mode: short leg is treated as avoid/underweight, not actual short positions.')
@@ -175,15 +206,34 @@ def print_combined_signal_report(df: pd.DataFrame, p: CombinedParams) -> None:
         print(f'Actionable BUY candidates ({len(buys)}): {", ".join(buys)}')
     print()
     print(f'{"Ticker":<7}{"XS":<6}{"XS score":>9}{"Price":>10}{"Z":>7}'
-          f'{"MR":>5}{"Mom preset":<12}{"Mom score":>10}{"Mom sig":>8}{"Final":>14}{"  Reason"}')
-    print('-' * 120)
+          f'{"MR":>5}{"Mom preset":<12}{"Mom score":>10}{"Mom sig":>8}{"10KΔ":>7}{"Final":>14}{"  Reason"}')
+    print('-' * 128)
     for _, r in df.iterrows():
         reason_short = r['reason'] if len(r['reason']) <= 38 else r['reason'][:35] + '...'
         mom_preset = r.get('momentum_preset', 'mom_126d_skip21')
+        score = tenk.get(str(r['ticker']).upper())
+        if isinstance(score, (int, float)) and score is not None and not pd.isna(score):
+            tenk_cell = f'{float(score):+.2f}'
+        else:
+            tenk_cell = '  —  '
+        final = str(r['final_action'])
+        if (
+            final == 'BUY'
+            and isinstance(score, (int, float))
+            and score is not None
+            and not pd.isna(score)
+            and float(score) <= RISK_FLAG_THRESHOLD
+        ):
+            final = f'{final} ⚠RISK↑'
         print(f'{r["ticker"]:<7}{r["xs_leg"]:<6}{r["xs_score"]:>+8.1%}'
               f'{r["price"]:>10.2f}{r["z"]:>+7.2f}'
               f'{r["mr_signal"]:>5}{mom_preset:<12}{r["momentum"]:>+9.1%}'
-              f'{r["mom_signal"]:>8}{r["final_action"]:>14}  {reason_short}')
+              f'{r["mom_signal"]:>8}{tenk_cell:>7}{final:>14}  {reason_short}')
+    print()
+    print(
+        '10KΔ = YoY risk-language change (cached); ⚠RISK↑ = BUY signal conflicts with '
+        'worsening filing. Run tenk_reader.py to refresh.'
+    )
 
 
 def _rebalance_days(n: int, rebalance: int) -> set[int]:
