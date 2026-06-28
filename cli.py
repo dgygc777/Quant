@@ -172,6 +172,21 @@ def mom_params_from_panel(params: dict) -> dict:
     return {'lookback': params['lookback'], 'skip': params['skip']}
 
 
+def validation_grid_from_panel_params(params: dict) -> dict:
+    """Single-combo WF grid matching the live cross-sectional rank settings."""
+    return {
+        'lookback': [int(params['lookback'])],
+        'skip': [int(params['skip'])],
+        'top_frac': [float(params['top_frac'])],
+        'rebalance': [int(params['rebalance'])],
+    }
+
+
+def validation_warmup_from_panel_params(params: dict) -> int:
+    """Enough prior bars for the selected momentum preset at test-window start."""
+    return max(40, int(params['lookback']) + int(params['skip']) + 5)
+
+
 def add_common_args(p: argparse.ArgumentParser) -> None:
     p.add_argument('--portfolio', type=Path, default=DEFAULT_PORTFOLIO,
                    help='Path to paper portfolio JSON')
@@ -421,6 +436,7 @@ def _print_wf_validation(
     test: int = 63,
     coverage: pd.Series | None = None,
     momentum_preset: str = 'custom',
+    xs_params: dict | None = None,
     headline_cost: float = DEFAULT_COST,
     headline_cost_bps: float | None = None,
     n_trials: int = DEFAULT_SELECTION_TRIALS,
@@ -441,6 +457,20 @@ def _print_wf_validation(
     print('\n=== Walk-forward validation (same universe / XS rules) ===')
     print('Full fold detail: python3 validate_cross_sectional.py --universe <preset>')
     from quant.data_quality import filter_panel_by_coverage
+    if xs_params is not None:
+        validation_grid = validation_grid_from_panel_params(xs_params)
+        validation_warmup = validation_warmup_from_panel_params(xs_params)
+        validation_label = (
+            f"{momentum_preset} live preset "
+            f"(lookback={xs_params['lookback']}, skip={xs_params['skip']}, "
+            f"top_frac={xs_params['top_frac']}, rebalance={xs_params['rebalance']})"
+        )
+        print(f'Validation strategy: {validation_label}')
+    else:
+        validation_grid = GRID
+        validation_warmup = WARMUP
+        validation_label = 'grid-optimized XS strategy (not the live preset)'
+        print(f'Validation strategy: {validation_label}')
     panel, _, dropped = filter_panel_by_coverage(panel, MIN_COVERAGE, coverage=coverage)
     if len(dropped):
         print(f'Excluded from validation (coverage < {MIN_COVERAGE:.0%}): {format_coverage(dropped)}')
@@ -457,13 +487,13 @@ def _print_wf_validation(
     wf = report_panel_validation(
         'Portfolio compare WF',
         panel,
-        GRID,
+        validation_grid,
         book='long_only',
         cost=headline_cost,
         n_trials=n_trials,
         train=train,
         test=test,
-        warmup=WARMUP,
+        warmup=validation_warmup,
     )
     oos = wf['oos_metrics']
     headline_sweep_bps = (
@@ -474,25 +504,25 @@ def _print_wf_validation(
     sweep_levels = sorted({float(level) for level in COST_SWEEP_BPS} | {headline_sweep_bps})
     cost_sensitivity = transaction_cost_sensitivity(
         panel,
-        GRID,
+        validation_grid,
         cost_bps_levels=sweep_levels,
         selection_cost=headline_cost,
         n_trials=n_trials,
         train=train,
         test=test,
-        warmup=WARMUP,
+        warmup=validation_warmup,
     )
     print_transaction_cost_sensitivity(
         cost_sensitivity,
-        label=momentum_preset,
+        label=validation_label,
         headline_cost_bps=headline_cost_bps,
     )
     sizing_validation = compare_weighting_validation(
         panel,
-        GRID,
+        validation_grid,
         train=train,
         test=test,
-        warmup=WARMUP,
+        warmup=validation_warmup,
         cost=headline_cost,
     )
     print_weighting_validation_report(sizing_validation)
@@ -563,6 +593,9 @@ def _print_wf_validation(
         'cost_sensitivity': cost_sensitivity,
         'break_even_cost_bps': cost_sensitivity.get('break_even_bps'),
         'headline_cost_bps': headline_cost_bps,
+        'validation_param_grid': validation_grid,
+        'validation_warmup': validation_warmup,
+        'validation_label': validation_label,
     }
 
 
@@ -1038,6 +1071,7 @@ def cmd_portfolio_compare(args) -> None:
             panel,
             coverage=coverage,
             momentum_preset=xs_params['momentum_preset'],
+            xs_params=xs_params,
             headline_cost=strategy_cost,
             headline_cost_bps=getattr(args, 'cost_bps', DEFAULT_COST * 10_000),
             n_trials=getattr(args, 'n_trials', DEFAULT_SELECTION_TRIALS),

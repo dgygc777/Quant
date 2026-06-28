@@ -192,6 +192,13 @@ class TestPipelineStress(unittest.TestCase):
 
     def test_validate_path_prints_sizing_table_and_self_check(self):
         panel = synthetic_panel(n_days=180, n_assets=6)
+        xs_params = {
+            'momentum_preset': 'mom_10d',
+            'lookback': 10,
+            'skip': 0,
+            'top_frac': 0.25,
+            'rebalance': 5,
+        }
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             stats = _print_wf_validation(
@@ -199,10 +206,18 @@ class TestPipelineStress(unittest.TestCase):
                 train=80,
                 test=20,
                 coverage=coverage_by_ticker(panel),
+                momentum_preset='mom_10d',
+                xs_params=xs_params,
             )
         out = buf.getvalue()
 
         self.assertIsNotNone(stats)
+        self.assertEqual(stats['validation_param_grid']['lookback'], [10])
+        self.assertEqual(stats['validation_param_grid']['skip'], [0])
+        self.assertEqual(stats['validation_param_grid']['top_frac'], [0.25])
+        self.assertEqual(stats['validation_param_grid']['rebalance'], [5])
+        self.assertIn('Validation strategy: mom_10d live preset', out)
+        self.assertIn('Transaction-cost sensitivity (long-only book, mom_10d live preset', out)
         self.assertIn('Information ratio (active-return OOS)', out)
         self.assertIn('Selection-adjusted bar', out)
         self.assertIn('=== Sizing-scheme OOS validation (long-only book) ===', out)

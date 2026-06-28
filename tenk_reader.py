@@ -14,8 +14,6 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 
-import anthropic
-import edgar
 import pandas as pd
 
 from quant.risk_extraction import (
@@ -28,19 +26,37 @@ from quant.risk_extraction import (
     select_quarterly_comparison_sections,
 )
 
-def _configure_edgar() -> None:
+_EDGAR_CONFIGURED = False
+
+
+def _configure_edgar(edgar_module) -> None:
     try:
         import hishel
         if not hasattr(hishel, 'FileStorage'):
-            edgar.httpclient.CACHE_ENABLED = False
-            edgar.httpclient.close_clients()
+            edgar_module.httpclient.CACHE_ENABLED = False
+            edgar_module.httpclient.close_clients()
     except ImportError:
-        edgar.httpclient.CACHE_ENABLED = False
-        edgar.httpclient.close_clients()
+        edgar_module.httpclient.CACHE_ENABLED = False
+        edgar_module.httpclient.close_clients()
 
 
-_configure_edgar()
-edgar.set_identity('Dean Chen dean@example.com')
+def _edgar_client():
+    """Import and configure EDGAR only for fetch paths."""
+    global _EDGAR_CONFIGURED
+    import edgar
+
+    if not _EDGAR_CONFIGURED:
+        _configure_edgar(edgar)
+        edgar.set_identity('Dean Chen dean@example.com')
+        _EDGAR_CONFIGURED = True
+    return edgar
+
+
+def _anthropic_client_module():
+    """Import Anthropic only for LLM scoring paths."""
+    import anthropic
+
+    return anthropic
 
 CACHE_PATH = 'tenk_cache.json'
 DEFAULT_MODEL = 'claude-haiku-4-5-20251001'
@@ -273,6 +289,7 @@ def fetch_two_annuals(
 ) -> list[tuple[str, str, str]]:
     """Return up to two (filing_date, full_text, form) base annual filings, newest first."""
     try:
+        edgar = _edgar_client()
         company = edgar.Company(ticker)
         forms = ['10-K', '20-F', '10-K/A', '20-F/A'] if include_amendments else ['10-K', '20-F']
         filings = company.get_filings(form=forms)
@@ -299,6 +316,7 @@ def fetch_two_annuals(
 def fetch_two_quarterlies(ticker: str) -> dict:
     """Return latest 10-Q and seasonality-controlled comparison metadata."""
     try:
+        edgar = _edgar_client()
         company = edgar.Company(ticker)
         filings = company.get_filings(form=['10-Q'])
         if filings is None:
@@ -498,7 +516,6 @@ def score_change(
             'non_comparable_reason': 'extraction quality below threshold',
         }
 
-    client = anthropic.Anthropic()
     if source == 'quarterly':
         section_label = 'MD&A' if section_used == 'mda_both' else 'Risk Factors'
         prompt = (
@@ -533,7 +550,10 @@ def score_change(
             f'PRIOR YEAR:\n{prior_detail.section[:RISK_CAP]}\n\n'
             f'CURRENT YEAR:\n{current_detail.section[:RISK_CAP]}'
         )
+    anthropic = None
     try:
+        anthropic = _anthropic_client_module()
+        client = anthropic.Anthropic()
         msg = client.messages.create(
             model=model,
             max_tokens=512,
@@ -563,13 +583,17 @@ def score_change(
             'confidence': conf,
             'non_comparable_reason': parsed.get('non_comparable_reason'),
         }
-    except anthropic.APIStatusError as exc:
-        return {'change_score': None, 'summary': f'API error ({exc.status_code}): {exc.message}'}
-    except anthropic.APIError as exc:
-        return {'change_score': None, 'summary': f'API error: {exc}'}
+    except ImportError as exc:
+        return {'change_score': None, 'summary': f'API client missing: {exc}'}
     except (json.JSONDecodeError, ValueError, KeyError, TypeError) as exc:
         return {'change_score': None, 'summary': f'parse error: {exc}'}
     except Exception as exc:
+        api_status_error = getattr(anthropic, 'APIStatusError', ()) if anthropic is not None else ()
+        api_error = getattr(anthropic, 'APIError', ()) if anthropic is not None else ()
+        if api_status_error and isinstance(exc, api_status_error):
+            return {'change_score': None, 'summary': f'API error ({exc.status_code}): {exc.message}'}
+        if api_error and isinstance(exc, api_error):
+            return {'change_score': None, 'summary': f'API error: {exc}'}
         return {'change_score': None, 'summary': f'error: {type(exc).__name__}: {exc}'}
 
 
