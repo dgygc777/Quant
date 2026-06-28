@@ -7,6 +7,7 @@ import pandas as pd
 
 
 TRADING_DAYS = 252.0
+WEIGHTING_METHODS = ('equal', 'inverse_vol', 'risk_parity', 'min_variance')
 
 
 def _validate_square_frame(cov: pd.DataFrame) -> pd.DataFrame:
@@ -200,7 +201,7 @@ def report_sizing(
 ) -> dict:
     """Print weights, volatility, and equal-weight risk concentration."""
     cov = estimate_covariance(returns)
-    methods = ['equal', 'inverse_vol', 'risk_parity', 'min_variance']
+    methods = list(WEIGHTING_METHODS)
     weights: dict[str, pd.Series] = {}
     errors: dict[str, str] = {}
     for method in methods:

@@ -35,14 +35,18 @@ from quant.data_quality import (
     format_coverage as _format_coverage,
 )
 from quant.metrics import metrics
+from quant.combined_signal import backtest_xs_long_only
 from quant.models.cross_sectional import CrossSectionalModel, backtest_xs
+from quant.risk_model import WEIGHTING_METHODS
 from quant.universes import DEFAULT_PRESET, get_universe
 from quant.validation import iter_param_grid, optimize_full, walk_forward
 
 BOOK_CHOICES = ('long_only', 'long_short')
 MIN_VALIDATION_NAMES = 4
 MIN_VALIDATION_FOLDS = 8
-ACTIVE_SHARPE_EDGE_MARGIN = 0.25
+ACTIVE_IR_EDGE_MARGIN = 0.25
+# Backward-compatible name for older callers/tests that imported this constant.
+ACTIVE_SHARPE_EDGE_MARGIN = ACTIVE_IR_EDGE_MARGIN
 VERDICT_EDGE = 'EDGE'
 VERDICT_MATCHES = 'MATCHES BENCHMARK — captures sector beta, not alpha'
 VERDICT_FAILS = 'FAILS'
@@ -69,7 +73,7 @@ def book_description(book: str) -> str:
     return 'LONG/SHORT dollar-neutral book (diagnostic spread, not the default long-only gate)'
 
 
-def make_xs_strategy(book: str = 'long_only'):
+def make_xs_strategy(book: str = 'long_only', weighting: str = 'equal'):
     """backtest_xs returns (DataFrame, n_rebalances); strategy returns are strat_net."""
     market_neutral = book_market_neutral(book)
 
@@ -78,6 +82,7 @@ def make_xs_strategy(book: str = 'long_only'):
             panel,
             mode='momentum',
             market_neutral=market_neutral,
+            weighting=weighting,
             **kw,
         )[0]['strat_net']
 
@@ -87,6 +92,22 @@ def make_xs_strategy(book: str = 'long_only'):
 def xs_strat(panel, **kw):
     """Backward-compatible default: validate the long-only book."""
     return make_xs_strategy('long_only')(panel, **kw)
+
+
+def make_weighted_long_only_strategy(weighting: str):
+    """Strategy adapter for validating long-only weighting schemes."""
+
+    def _strategy(panel, **kw):
+        return backtest_xs_long_only(
+            panel,
+            {
+                'mode': 'momentum',
+                **kw,
+                'weighting': weighting,
+            },
+        )['strat_net']
+
+    return _strategy
 
 
 def _xs_model_params(grid_params: dict, book: str = 'long_only') -> dict:
@@ -109,21 +130,49 @@ def equal_weight_oos_returns(panel: pd.DataFrame, oos_index: pd.Index) -> pd.Ser
     return benchmark.reindex(oos_index).dropna()
 
 
+def active_oos_returns(strategy_returns: pd.Series, benchmark_returns: pd.Series) -> pd.Series:
+    """Align OOS strategy and benchmark returns, then subtract benchmark."""
+    aligned = pd.concat([
+        strategy_returns.rename('strategy'),
+        benchmark_returns.rename('benchmark'),
+    ], axis=1).dropna()
+    if aligned.empty:
+        return pd.Series(dtype=float)
+    return aligned['strategy'] - aligned['benchmark']
+
+
+def information_ratio(active_returns: pd.Series) -> float:
+    """Annualized information ratio of active-return OOS series."""
+    active_returns = active_returns.dropna()
+    if active_returns.empty:
+        return 0.0
+    std = float(active_returns.std())
+    mean = float(active_returns.mean())
+    if std <= 1e-15:
+        if mean > 0.0:
+            return float('inf')
+        if mean < 0.0:
+            return float('-inf')
+        return 0.0
+    return mean / std * np.sqrt(252.0)
+
+
 def validation_verdict(
     strategy_oos_sharpe: float,
-    benchmark_oos_sharpe: float,
+    active_information_ratio: float,
     folds: int,
     *,
     min_folds: int = MIN_VALIDATION_FOLDS,
-    margin: float = ACTIVE_SHARPE_EDGE_MARGIN,
+    margin: float = ACTIVE_IR_EDGE_MARGIN,
 ) -> str:
-    """Classify whether OOS performance beats the same-universe benchmark."""
+    """Classify whether OOS active returns beat the same-universe benchmark."""
     if folds < min_folds or pd.isna(strategy_oos_sharpe) or strategy_oos_sharpe <= 0:
         return VERDICT_FAILS
-    active = strategy_oos_sharpe - benchmark_oos_sharpe
-    if active > margin:
+    if pd.isna(active_information_ratio):
+        return VERDICT_FAILS
+    if active_information_ratio > margin:
         return VERDICT_EDGE
-    if abs(active) <= margin:
+    if abs(active_information_ratio) <= margin:
         return VERDICT_MATCHES
     return VERDICT_FAILS
 
@@ -223,10 +272,14 @@ def report_panel_validation(name, panel, param_grid, show_fold_ranks: bool = Fal
     benchmark_oos_returns = equal_weight_oos_returns(panel, wf['oos_returns'].index)
     benchmark_oos = metrics(benchmark_oos_returns)
     active_oos_sharpe = oos['sharpe'] - benchmark_oos['sharpe']
-    verdict = validation_verdict(oos['sharpe'], benchmark_oos['sharpe'], len(wf['folds']))
+    active_returns = active_oos_returns(wf['oos_returns'], benchmark_oos_returns)
+    active_ir = information_ratio(active_returns)
+    verdict = validation_verdict(oos['sharpe'], active_ir, len(wf['folds']))
     wf['benchmark_oos_returns'] = benchmark_oos_returns
     wf['benchmark_oos_metrics'] = benchmark_oos
+    wf['active_oos_returns'] = active_returns
     wf['active_oos_sharpe'] = active_oos_sharpe
+    wf['information_ratio'] = active_ir
     wf['validation_verdict'] = verdict
     mean_is = np.mean([f['in_sample_sharpe'] for f in wf['folds']]) if wf['folds'] else 0.0
 
@@ -243,7 +296,8 @@ def report_panel_validation(name, panel, param_grid, show_fold_ranks: bool = Fal
     gap = full_m['sharpe'] - oos['sharpe']
     print(f'\nOverfitting tax (naive - OOS Sharpe): {gap:.2f}')
     print(f'Active OOS Sharpe (strategy - benchmark): {active_oos_sharpe:+.2f}')
-    print(f'Validation verdict: {verdict} (edge margin {ACTIVE_SHARPE_EDGE_MARGIN:.2f})')
+    print(f'Information ratio (active-return OOS): {active_ir:+.2f}')
+    print(f'Validation verdict: {verdict} (IR edge margin {ACTIVE_IR_EDGE_MARGIN:.2f})')
     print(f'Folds: {len(wf["folds"])}')
 
     if show_fold_ranks:
@@ -256,6 +310,103 @@ def report_panel_validation(name, panel, param_grid, show_fold_ranks: bool = Fal
         )
 
     return wf
+
+
+def compare_weighting_validation(panel: pd.DataFrame, param_grid: dict, **wf_kwargs) -> dict:
+    """Walk-forward validate long-only sizing schemes and the benchmark."""
+    rows: dict[str, dict] = {}
+    first_oos_index: pd.Index | None = None
+    for weighting in WEIGHTING_METHODS:
+        try:
+            wf = walk_forward(
+                make_weighted_long_only_strategy(weighting),
+                panel,
+                param_grid,
+                **wf_kwargs,
+            )
+            oos = wf['oos_metrics']
+            if first_oos_index is None:
+                first_oos_index = wf['oos_returns'].index
+            rows[weighting] = {
+                'sharpe': oos['sharpe'],
+                'ann_return': oos['ann_return'],
+                'ann_vol': oos['ann_vol'],
+                'max_dd': oos['max_dd'],
+                'wf': wf,
+                'error': None,
+            }
+        except (AssertionError, ValueError, TypeError, np.linalg.LinAlgError, FloatingPointError) as exc:
+            rows[weighting] = {
+                'sharpe': float('nan'),
+                'ann_return': float('nan'),
+                'ann_vol': float('nan'),
+                'max_dd': float('nan'),
+                'wf': None,
+                'error': str(exc),
+            }
+
+    if first_oos_index is None:
+        first_oos_index = pd.Index([])
+    benchmark_returns = equal_weight_oos_returns(panel, first_oos_index)
+    benchmark_metrics = metrics(benchmark_returns)
+    rows['benchmark'] = {
+        'sharpe': benchmark_metrics['sharpe'],
+        'ann_return': benchmark_metrics['ann_return'],
+        'ann_vol': benchmark_metrics['ann_vol'],
+        'max_dd': benchmark_metrics['max_dd'],
+        'wf': None,
+        'error': None,
+    }
+
+    candidates = {
+        name: row for name, row in rows.items()
+        if name in WEIGHTING_METHODS and row['error'] is None and not pd.isna(row['sharpe'])
+    }
+    best_weighting = max(candidates, key=lambda name: candidates[name]['sharpe']) if candidates else None
+    equal_sharpe = rows.get('equal', {}).get('sharpe')
+    risk_parity_sharpe = rows.get('risk_parity', {}).get('sharpe')
+    risk_parity_beats_equal = (
+        equal_sharpe is not None
+        and risk_parity_sharpe is not None
+        and not pd.isna(equal_sharpe)
+        and not pd.isna(risk_parity_sharpe)
+        and risk_parity_sharpe > equal_sharpe
+    )
+    return {
+        'rows': rows,
+        'best_weighting': best_weighting,
+        'risk_parity_beats_equal': risk_parity_beats_equal,
+    }
+
+
+def print_weighting_validation_report(summary: dict) -> None:
+    """Print sizing-scheme walk-forward metrics."""
+    rows = summary.get('rows', {})
+    print('\n=== Sizing-scheme OOS validation (long-only book) ===')
+    print(f"{'Weighting':<16}{'OOS Sharpe':>11}{'AnnRet':>9}{'Vol':>8}{'MaxDD':>9}")
+    for name in list(WEIGHTING_METHODS) + ['benchmark']:
+        row = rows.get(name)
+        if not row:
+            continue
+        if row.get('error'):
+            print(f'{name:<16} skipped ({row["error"]})')
+            continue
+        print(
+            f"{name:<16}{row['sharpe']:>11.2f}"
+            f"{row['ann_return']:>9.1%}{row['ann_vol']:>8.1%}{row['max_dd']:>9.1%}"
+        )
+
+    best = summary.get('best_weighting')
+    if best:
+        best_sharpe = rows[best]['sharpe']
+        rp_note = (
+            'risk_parity beats equal'
+            if summary.get('risk_parity_beats_equal')
+            else 'risk_parity does not beat equal'
+        )
+        print(f'Takeaway: best OOS Sharpe is {best} ({best_sharpe:.2f}); {rp_note}.')
+    else:
+        print('Takeaway: no sizing scheme produced an estimable OOS Sharpe.')
 
 
 def main() -> None:

@@ -413,6 +413,8 @@ def _print_wf_validation(
         GRID,
         MIN_VALIDATION_NAMES,
         WARMUP,
+        compare_weighting_validation,
+        print_weighting_validation_report,
         report_panel_validation,
     )
     print('\n=== Walk-forward validation (same universe / XS rules) ===')
@@ -441,6 +443,23 @@ def _print_wf_validation(
         warmup=WARMUP,
     )
     oos = wf['oos_metrics']
+    sizing_validation = compare_weighting_validation(
+        panel,
+        GRID,
+        train=train,
+        test=test,
+        warmup=WARMUP,
+    )
+    print_weighting_validation_report(sizing_validation)
+    equal_row = sizing_validation.get('rows', {}).get('equal', {})
+    equal_sharpe = equal_row.get('sharpe')
+    if equal_row.get('error') is None and equal_sharpe is not None and abs(equal_sharpe - oos['sharpe']) <= 1e-10:
+        print('Self-check: OK - equal weighting matches main long-only OOS Sharpe.')
+    else:
+        print(
+            'Self-check: WARNING - equal weighting OOS Sharpe diverges from '
+            f"main long-only OOS Sharpe ({equal_sharpe} vs {oos['sharpe']:.6f})."
+        )
     return {
         'folds': len(wf['folds']),
         'oos_sharpe': oos['sharpe'],
@@ -450,7 +469,11 @@ def _print_wf_validation(
         'benchmark_oos_ann_return': wf.get('benchmark_oos_metrics', {}).get('ann_return'),
         'benchmark_oos_max_dd': wf.get('benchmark_oos_metrics', {}).get('max_dd'),
         'active_oos_sharpe': wf.get('active_oos_sharpe'),
+        'information_ratio': wf.get('information_ratio'),
         'validation_verdict': wf.get('validation_verdict'),
+        'sizing_validation': sizing_validation,
+        'winning_weighting': sizing_validation.get('best_weighting'),
+        'risk_parity_beats_equal': sizing_validation.get('risk_parity_beats_equal'),
     }
 
 
@@ -596,6 +619,12 @@ def _fmt_float(value: float | None) -> str:
     return f'{value:.2f}'
 
 
+def _fmt_weighting(value: str | None) -> str:
+    if not value:
+        return 'n/a'
+    return str(value).replace('_', '-')
+
+
 def _join_tickers(tickers: list[str], max_items: int = 8) -> str:
     tickers = [str(t) for t in tickers]
     if not tickers:
@@ -669,13 +698,16 @@ def _buy_strategy_conclusion(
     oos_max_dd = validation_stats.get('oos_max_dd') if validation_stats else None
     benchmark_oos_sharpe = validation_stats.get('benchmark_oos_sharpe') if validation_stats else None
     active_oos_sharpe = validation_stats.get('active_oos_sharpe') if validation_stats else None
+    active_ir = validation_stats.get('information_ratio') if validation_stats else None
+    winning_weighting = validation_stats.get('winning_weighting') if validation_stats else None
+    risk_parity_beats_equal = validation_stats.get('risk_parity_beats_equal') if validation_stats else None
     verdict = validation_stats.get('validation_verdict') if validation_stats else 'FAILS'
     validation_edge = verdict == 'EDGE'
     if validation_edge:
         validation_desc = (
             f"Validation verdict EDGE: strategy OOS Sharpe {_fmt_float(oos_sharpe)} vs "
             f"equal-weight benchmark {_fmt_float(benchmark_oos_sharpe)} "
-            f"(active {_fmt_float(active_oos_sharpe)}), "
+            f"(Sharpe spread {_fmt_float(active_oos_sharpe)}, active-return IR {_fmt_float(active_ir)}), "
             f"ann return {_fmt_pct(oos_ann_return)}, max DD {_fmt_pct(oos_max_dd)} "
             f"over {folds} folds."
         )
@@ -683,14 +715,16 @@ def _buy_strategy_conclusion(
         validation_desc = (
             f"Validation verdict {verdict}: strategy OOS Sharpe {_fmt_float(oos_sharpe)} vs "
             f"benchmark {_fmt_float(benchmark_oos_sharpe)} "
-            f"(active {_fmt_float(active_oos_sharpe)}), max DD {_fmt_pct(oos_max_dd)}, "
+            f"(Sharpe spread {_fmt_float(active_oos_sharpe)}, active-return IR {_fmt_float(active_ir)}), "
+            f"max DD {_fmt_pct(oos_max_dd)}, "
             f"folds {folds}; this is a research candidate that does not beat the basket."
         )
     else:
         validation_desc = (
             f"Validation verdict FAILS: the ranking has no validated benchmark-relative edge "
             f"(strategy OOS Sharpe {_fmt_float(oos_sharpe)} vs benchmark "
-            f"{_fmt_float(benchmark_oos_sharpe)}, active {_fmt_float(active_oos_sharpe)}, "
+            f"{_fmt_float(benchmark_oos_sharpe)}, Sharpe spread {_fmt_float(active_oos_sharpe)}, "
+            f"active-return IR {_fmt_float(active_ir)}, "
             f"max DD {_fmt_pct(oos_max_dd)}, folds {folds}), so the momentum list is a "
             f"research/watchlist candidate screen only."
         )
@@ -756,6 +790,7 @@ def _buy_strategy_conclusion(
     ]
     if sizing_stats and risk_contribution_pool:
         if concentration_flags:
+            recommended_weighting = winning_weighting if winning_weighting and winning_weighting != 'equal' else 'risk_parity'
             risk_desc = (
                 'risk-concentration flags: '
                 + '; '.join(
@@ -763,7 +798,7 @@ def _buy_strategy_conclusion(
                     f'({_fmt_pct(rc_pct[ticker])} vs equal-dollar {_fmt_pct(equal_share)})'
                     for ticker in concentration_flags
                 )
-                + '; equal-dollar sizing is inappropriate - use risk-parity sizing instead'
+                + f'; equal-dollar sizing is inappropriate - use {_fmt_weighting(recommended_weighting)} sizing instead'
             )
         else:
             risk_desc = (
@@ -773,6 +808,13 @@ def _buy_strategy_conclusion(
             )
     else:
         risk_desc = 'equal-weight risk contribution was not available for a coverage-approved pool'
+    if winning_weighting:
+        rp_desc = (
+            'risk_parity beat equal'
+            if risk_parity_beats_equal
+            else 'risk_parity did not beat equal'
+        )
+        risk_desc += f'; OOS sizing validation winner: {winning_weighting} ({rp_desc})'
 
     contradiction_parts = []
     for ticker in risk_pool:

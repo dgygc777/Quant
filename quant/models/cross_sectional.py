@@ -5,12 +5,62 @@ import pandas as pd
 
 from quant.data_quality import EXTREME_DAILY_RETURN, coverage_by_ticker
 from quant.params import validate_xs_params
+from quant.risk_model import WEIGHTING_METHODS, size_long_leg
 
 from quant.models.panel_base import PanelModel
 from quant.universes import DEFAULT_UNIVERSE, DEFAULT_PRESET, universe_selection_note
 
 # Re-export for backward compatibility.
 DEFAULT_TOP_FRAC = 0.25
+DEFAULT_RISK_LOOKBACK = 252
+
+
+def _normal_weighting_name(weighting: str) -> str:
+    key = str(weighting).lower().replace('-', '_')
+    if key not in WEIGHTING_METHODS:
+        raise ValueError(
+            "weighting must be one of: 'equal', 'inverse_vol', 'risk_parity', 'min_variance'."
+        )
+    return key
+
+
+def _equal_long_weights(selected: pd.Index | list[str]) -> pd.Series:
+    selected = list(selected)
+    if not selected:
+        return pd.Series(dtype=float)
+    return pd.Series(1.0 / len(selected), index=selected)
+
+
+def _sized_long_weights(
+    prices: pd.DataFrame,
+    t: int,
+    selected: pd.Index | list[str],
+    weighting: str,
+    risk_lookback: int = DEFAULT_RISK_LOOKBACK,
+    risk_shrink: float = 0.2,
+) -> pd.Series:
+    """Size selected longs using only returns available through rebalance t."""
+    selected = list(selected)
+    if weighting == 'equal':
+        return _equal_long_weights(selected)
+    history = prices.iloc[:t + 1][selected]
+    trailing = (
+        history
+        .pct_change(fill_method=None)
+        .tail(risk_lookback)
+        .dropna(how='all')
+        .dropna()
+    )
+    min_rows = max(20, 5 * len(selected))
+    if len(trailing) < min_rows:
+        return _equal_long_weights(selected)
+    try:
+        weights = size_long_leg(trailing, method=weighting, shrink=risk_shrink).reindex(selected)
+    except (AssertionError, ValueError, TypeError, np.linalg.LinAlgError, FloatingPointError):
+        return _equal_long_weights(selected)
+    if weights.isna().any() or float(weights.sum()) <= 0:
+        return _equal_long_weights(selected)
+    return weights / float(weights.sum())
 
 
 def assess_panel_quality(prices: pd.DataFrame) -> dict:
@@ -106,9 +156,15 @@ def compute_scores(
 
 
 def build_weights(prices: pd.DataFrame, scores: pd.DataFrame, top_frac: float = 0.33,
-                  rebalance: int = 5, market_neutral: bool = True) -> pd.DataFrame:
+                  rebalance: int = 5, market_neutral: bool = True,
+                  weighting: str = 'equal',
+                  risk_lookback: int = DEFAULT_RISK_LOOKBACK,
+                  risk_shrink: float = 0.2) -> pd.DataFrame:
     """Build daily target weights with periodic rebalance."""
     validate_xs_params(top_frac=top_frac, rebalance=rebalance)
+    weighting = _normal_weighting_name(weighting)
+    if market_neutral and weighting != 'equal':
+        raise ValueError('non-equal weighting is only implemented for the long-only book.')
     n = prices.shape[1]
     k = max(1, int(round(top_frac * n)))
     rebal_days = set(range(0, len(prices), rebalance))
@@ -120,7 +176,16 @@ def build_weights(prices: pd.DataFrame, scores: pd.DataFrame, top_frac: float = 
             if len(s) >= 2 * k:
                 ranked = s.sort_values()
                 w = pd.Series(0.0, index=prices.columns)
-                w[ranked.index[-k:]] = 1.0 / k
+                selected_longs = ranked.index[-k:]
+                long_w = _sized_long_weights(
+                    prices,
+                    t,
+                    selected_longs,
+                    weighting,
+                    risk_lookback=risk_lookback,
+                    risk_shrink=risk_shrink,
+                )
+                w[long_w.index] = long_w
                 if market_neutral:
                     w[ranked.index[:k]] = -1.0 / k
                 last_w = w
@@ -159,6 +224,9 @@ def portfolio_returns(weights: pd.DataFrame, rets: pd.DataFrame,
 
 def backtest_xs(prices: pd.DataFrame, mode: str = 'momentum', top_frac: float = 0.33,
                 rebalance: int = 5, cost: float = 0.0005, market_neutral: bool = True,
+                weighting: str = 'equal',
+                risk_lookback: int = DEFAULT_RISK_LOOKBACK,
+                risk_shrink: float = 0.2,
                 **sig_kw) -> pd.DataFrame:
     validate_xs_params(
         top_frac=top_frac,
@@ -169,7 +237,16 @@ def backtest_xs(prices: pd.DataFrame, mode: str = 'momentum', top_frac: float = 
     )
     rets = prices.pct_change(fill_method=None)
     scores = compute_scores(prices, mode=mode, **sig_kw)
-    weights = build_weights(prices, scores, top_frac, rebalance, market_neutral)
+    weights = build_weights(
+        prices,
+        scores,
+        top_frac,
+        rebalance,
+        market_neutral,
+        weighting=weighting,
+        risk_lookback=risk_lookback,
+        risk_shrink=risk_shrink,
+    )
     result = portfolio_returns(weights, rets, cost)
     n_rebalances = int((weights.diff().abs().sum(axis=1) > 1e-9).sum())
     return result, n_rebalances
@@ -194,6 +271,9 @@ class CrossSectionalModel(PanelModel):
             'top_frac': DEFAULT_TOP_FRAC,
             'rebalance': 5,
             'market_neutral': True,
+            'weighting': 'equal',
+            'risk_lookback': DEFAULT_RISK_LOOKBACK,
+            'risk_shrink': 0.2,
         }
 
     def _sig_params(self, params: dict) -> dict:
@@ -216,6 +296,9 @@ class CrossSectionalModel(PanelModel):
             rebalance=p['rebalance'],
             cost=cost,
             market_neutral=p['market_neutral'],
+            weighting=p.get('weighting', 'equal'),
+            risk_lookback=p.get('risk_lookback', DEFAULT_RISK_LOOKBACK),
+            risk_shrink=p.get('risk_shrink', 0.2),
             **self._sig_params(p),
         )
         return df.dropna(), n_rebal

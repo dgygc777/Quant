@@ -28,6 +28,7 @@ import pandas as pd
 from quant.data_quality import MIN_COVERAGE, coverage_by_ticker, format_coverage
 from quant.metrics import metrics
 from quant.models.cross_sectional import (
+    DEFAULT_RISK_LOOKBACK,
     build_weights,
     compute_scores,
     portfolio_returns,
@@ -351,6 +352,9 @@ def backtest_xs_long_only(
         top_frac=xs_params.get('top_frac', 0.25),
         rebalance=xs_params.get('rebalance', 5),
         market_neutral=False,
+        weighting=xs_params.get('weighting', 'equal'),
+        risk_lookback=xs_params.get('risk_lookback', DEFAULT_RISK_LOOKBACK),
+        risk_shrink=xs_params.get('risk_shrink', 0.2),
     )
     return portfolio_returns(weights, rets, cost)
 

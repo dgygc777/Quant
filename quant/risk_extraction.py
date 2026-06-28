@@ -9,6 +9,11 @@ RISK_CAP = 25_000
 MIN_SECTION_LEN = 3_000
 MIN_QUALITY_SCORE = 150.0
 
+# FUTURE: Extend this extraction layer with separate 10-Q and earnings-call
+# transcript fetch paths. They should reuse the same cache/change_score schema,
+# add a source field distinguishing 10-K, 10-Q, and call transcript inputs, and
+# attach a transcript-tone/guidance-change score beside the filing risk score.
+
 RISK_CUES = [
     'risk', 'adversely', 'could', 'uncertain', 'no assurance',
     'fluctuat', 'harm', 'may not', 'subject to',
