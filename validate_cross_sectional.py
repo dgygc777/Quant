@@ -23,7 +23,9 @@ tuning on all past data overstated how good the strategy looked.
 from __future__ import annotations
 
 import argparse
+import math
 import sys
+from statistics import NormalDist
 
 import numpy as np
 import pandas as pd
@@ -44,6 +46,11 @@ BOOK_CHOICES = ('long_only', 'long_short')
 MIN_VALIDATION_NAMES = 4
 MIN_VALIDATION_FOLDS = 8
 ACTIVE_IR_EDGE_MARGIN = 0.25
+DEFAULT_SELECTION_TRIALS = 20
+IR_CI_BLOCK = 21
+IR_CI_BOOT = 2000
+IR_CI_ALPHA = 0.05
+IR_CI_SEED = 0
 # Backward-compatible name for older callers/tests that imported this constant.
 ACTIVE_SHARPE_EDGE_MARGIN = ACTIVE_IR_EDGE_MARGIN
 VERDICT_EDGE = 'EDGE'
@@ -159,6 +166,73 @@ def information_ratio(active_returns: pd.Series) -> float:
     return mean / std * np.sqrt(252.0)
 
 
+def information_ratio_ci(
+    active_returns: pd.Series,
+    block: int = IR_CI_BLOCK,
+    n_boot: int = IR_CI_BOOT,
+    alpha: float = IR_CI_ALPHA,
+    seed: int = IR_CI_SEED,
+) -> tuple[float, float, float, float]:
+    """Deterministic block-bootstrap confidence interval for active-return IR.
+
+    Blocks preserve roughly monthly autocorrelation. If the OOS active-return
+    series is too short for a meaningful block bootstrap, the point estimate is
+    still returned and the interval fields are NaN; callers should treat that as
+    "CI unavailable", not as an error.
+    """
+    active = pd.Series(active_returns).dropna()
+    point_ir = information_ratio(active)
+    block = int(block)
+    n_boot = int(n_boot)
+    if block <= 0:
+        raise ValueError('block must be positive')
+    if n_boot <= 0:
+        raise ValueError('n_boot must be positive')
+    if len(active) < 2 * block:
+        return point_ir, float('nan'), float('nan'), float('nan')
+
+    values = active.to_numpy(dtype=float)
+    n = len(values)
+    max_start = n - block
+    rng = np.random.default_rng(seed)
+    n_blocks = int(math.ceil(n / block))
+    boot_irs = np.empty(n_boot, dtype=float)
+    for i in range(n_boot):
+        starts = rng.integers(0, max_start + 1, size=n_blocks)
+        sample = np.concatenate([values[start:start + block] for start in starts])[:n]
+        boot_irs[i] = information_ratio(pd.Series(sample))
+
+    finite = boot_irs[np.isfinite(boot_irs)]
+    if finite.size == 0:
+        return point_ir, float('nan'), float('nan'), float('nan')
+    lower = float(np.percentile(finite, 100.0 * (alpha / 2.0)))
+    upper = float(np.percentile(finite, 100.0 * (1.0 - alpha / 2.0)))
+    se = float(np.std(finite, ddof=1)) if finite.size > 1 else 0.0
+    return point_ir, lower, upper, se
+
+
+def expected_max_ir_under_null(n_trials: int, se: float) -> float:
+    """Expected best IR from trying ``n_trials`` pure-noise strategies."""
+    if se is None or pd.isna(se):
+        return float('nan')
+    se = float(se)
+    if se < 0:
+        raise ValueError('se must be non-negative')
+    if not np.isfinite(se):
+        return float('inf')
+    if se == 0.0:
+        return 0.0
+    n_trials = int(n_trials)
+    if n_trials <= 1:
+        return 0.0
+
+    gamma = 0.5772
+    normal = NormalDist()
+    p1 = min(max(1.0 - 1.0 / n_trials, 1e-12), 1.0 - 1e-12)
+    p2 = min(max(1.0 - 1.0 / (n_trials * math.e), 1e-12), 1.0 - 1e-12)
+    return se * ((1.0 - gamma) * normal.inv_cdf(p1) + gamma * normal.inv_cdf(p2))
+
+
 def buy_hold_equal_weight_benchmark(
     panel: pd.DataFrame,
     oos_index: pd.Index,
@@ -220,19 +294,80 @@ def validation_verdict(
     active_information_ratio: float,
     folds: int,
     *,
+    ci_lower: float | None = None,
+    ci_upper: float | None = None,
+    selection_threshold: float | None = None,
     min_folds: int = MIN_VALIDATION_FOLDS,
     margin: float = ACTIVE_IR_EDGE_MARGIN,
 ) -> str:
-    """Classify whether OOS active returns beat the same-universe benchmark."""
+    """Classify whether OOS active returns beat the benchmark with evidence."""
     if folds < min_folds or pd.isna(strategy_oos_sharpe) or strategy_oos_sharpe <= 0:
         return VERDICT_FAILS
     if pd.isna(active_information_ratio):
         return VERDICT_FAILS
-    if active_information_ratio > margin:
+    ci_upper_ok = ci_upper is not None and not pd.isna(ci_upper) and np.isfinite(ci_upper)
+    if ci_upper_ok and float(ci_upper) < 0.0:
+        return VERDICT_FAILS
+    ci_lower_ok = ci_lower is not None and not pd.isna(ci_lower) and np.isfinite(ci_lower)
+    threshold_ok = (
+        selection_threshold is not None
+        and not pd.isna(selection_threshold)
+        and np.isfinite(selection_threshold)
+    )
+    if (
+        ci_lower_ok
+        and threshold_ok
+        and float(ci_lower) > margin
+        and active_information_ratio > float(selection_threshold)
+    ):
         return VERDICT_EDGE
-    if abs(active_information_ratio) <= margin:
-        return VERDICT_MATCHES
-    return VERDICT_FAILS
+    return VERDICT_MATCHES
+
+
+def validation_verdict_reason(
+    strategy_oos_sharpe: float,
+    active_information_ratio: float,
+    folds: int,
+    *,
+    ci_lower: float | None,
+    ci_upper: float | None,
+    selection_threshold: float | None,
+    min_folds: int = MIN_VALIDATION_FOLDS,
+    margin: float = ACTIVE_IR_EDGE_MARGIN,
+) -> str:
+    """Human-readable reason matching ``validation_verdict``."""
+    if folds < min_folds:
+        return f'only {folds} folds; need at least {min_folds}'
+    if pd.isna(strategy_oos_sharpe) or strategy_oos_sharpe <= 0:
+        return 'strategy OOS Sharpe is not positive'
+    if pd.isna(active_information_ratio):
+        return 'active-return IR is unavailable'
+    if (
+        ci_upper is not None
+        and not pd.isna(ci_upper)
+        and np.isfinite(ci_upper)
+        and float(ci_upper) < 0.0
+    ):
+        return 'CI is confidently below zero active return'
+    if ci_lower is None or pd.isna(ci_lower) or not np.isfinite(ci_lower):
+        return 'CI unavailable; no EDGE from the point estimate alone'
+    if float(ci_lower) <= margin:
+        return 'CI straddles the edge margin; indistinguishable from beta'
+    if (
+        selection_threshold is None
+        or pd.isna(selection_threshold)
+        or not np.isfinite(selection_threshold)
+    ):
+        return 'selection-adjusted bar unavailable; no EDGE'
+    if float(active_information_ratio) <= float(selection_threshold):
+        return 'point IR does not clear the selection-adjusted null bar'
+    return 'CI clears the edge margin and point IR clears the selection-adjusted null bar'
+
+
+def _format_signed(value: float | None) -> str:
+    if value is None or pd.isna(value):
+        return 'n/a'
+    return f'{value:+.2f}'
 
 
 def _format_leg(label: str, as_of: pd.Timestamp, weights: pd.Series,
@@ -322,6 +457,11 @@ def report_panel_validation(
     show_fold_ranks: bool = False,
     book: str = 'long_only',
     cost: float | pd.Series = DEFAULT_XS_COST,
+    n_trials: int = DEFAULT_SELECTION_TRIALS,
+    ci_block: int = IR_CI_BLOCK,
+    ci_n_boot: int = IR_CI_BOOT,
+    ci_alpha: float = IR_CI_ALPHA,
+    ci_seed: int = IR_CI_SEED,
     **wf_kwargs,
 ) -> dict:
     """Panel walk-forward report — same three rows as quant.validation.report_validation."""
@@ -338,14 +478,58 @@ def report_panel_validation(
     benchmark_oos = metrics(benchmark_oos_returns)
     active_oos_sharpe = oos['sharpe'] - benchmark_oos['sharpe']
     active_returns = active_oos_returns(wf['oos_returns'], benchmark_oos_returns)
-    active_ir = information_ratio(active_returns)
-    verdict = validation_verdict(oos['sharpe'], active_ir, len(wf['folds']))
+    active_ir, ci_lower, ci_upper, ir_se = information_ratio_ci(
+        active_returns,
+        block=ci_block,
+        n_boot=ci_n_boot,
+        alpha=ci_alpha,
+        seed=ci_seed,
+    )
+    selection_bar = expected_max_ir_under_null(n_trials, ir_se)
+    verdict = validation_verdict(
+        oos['sharpe'],
+        active_ir,
+        len(wf['folds']),
+        ci_lower=ci_lower,
+        ci_upper=ci_upper,
+        selection_threshold=selection_bar,
+    )
+    verdict_reason = validation_verdict_reason(
+        oos['sharpe'],
+        active_ir,
+        len(wf['folds']),
+        ci_lower=ci_lower,
+        ci_upper=ci_upper,
+        selection_threshold=selection_bar,
+    )
+    aligned_oos = pd.concat([
+        wf['oos_returns'].rename('strategy'),
+        benchmark_oos_returns.rename('benchmark'),
+    ], axis=1).dropna()
+    benchmark_corr = (
+        float(aligned_oos['strategy'].corr(aligned_oos['benchmark']))
+        if len(aligned_oos) >= 2
+        else float('nan')
+    )
     wf['benchmark_oos_returns'] = benchmark_oos_returns
     wf['benchmark_oos_metrics'] = benchmark_oos
     wf['active_oos_returns'] = active_returns
     wf['active_oos_sharpe'] = active_oos_sharpe
     wf['information_ratio'] = active_ir
+    wf['information_ratio_ci_lower'] = ci_lower
+    wf['information_ratio_ci_upper'] = ci_upper
+    wf['information_ratio_se'] = ir_se
+    wf['information_ratio_ci_available'] = (
+        not pd.isna(ci_lower)
+        and not pd.isna(ci_upper)
+        and np.isfinite(ci_lower)
+        and np.isfinite(ci_upper)
+    )
+    wf['selection_expected_max_ir'] = selection_bar
+    wf['selection_trials'] = int(n_trials)
+    wf['benchmark_correlation'] = benchmark_corr
     wf['validation_verdict'] = verdict
+    wf['validation_verdict_reason'] = verdict_reason
     mean_is = np.mean([f['in_sample_sharpe'] for f in wf['folds']]) if wf['folds'] else 0.0
 
     print(f'\n=== {name} ===')
@@ -361,8 +545,24 @@ def report_panel_validation(
     gap = full_m['sharpe'] - oos['sharpe']
     print(f'\nOverfitting tax (naive - OOS Sharpe): {gap:.2f}')
     print(f'Active OOS Sharpe (strategy - benchmark): {active_oos_sharpe:+.2f}')
-    print(f'Information ratio (active-return OOS): {active_ir:+.2f}')
-    print(f'Validation verdict: {verdict} (IR edge margin {ACTIVE_IR_EDGE_MARGIN:.2f})')
+    confidence = int(round((1.0 - ci_alpha) * 100))
+    if wf['information_ratio_ci_available']:
+        ci_text = f'{_format_signed(ci_lower)}, {_format_signed(ci_upper)}'
+    else:
+        ci_text = 'unavailable - too few OOS active-return points'
+    print(
+        f'Information ratio (active-return OOS): {_format_signed(active_ir)}  '
+        f'[{confidence}% CI: {ci_text}]  (block-bootstrap, seed={ci_seed})'
+    )
+    print(
+        f'Selection-adjusted bar (N={int(n_trials)} trials): '
+        f'expected max IR under null ≈ {_format_signed(selection_bar)}'
+    )
+    corr_note = ''
+    if not pd.isna(benchmark_corr) and benchmark_corr > 0.90:
+        corr_note = '   <- active return is a thin residual; IR is low-power'
+    print(f'Benchmark correlation: {_format_signed(benchmark_corr)}{corr_note}')
+    print(f'Validation verdict: {verdict} - {verdict_reason}')
     print(f'Folds: {len(wf["folds"])}')
 
     if show_fold_ranks:
@@ -568,6 +768,11 @@ def transaction_cost_sensitivity(
     param_grid: dict,
     cost_bps_levels: list[float] | None = None,
     selection_cost: float | None = None,
+    n_trials: int = DEFAULT_SELECTION_TRIALS,
+    ci_block: int = IR_CI_BLOCK,
+    ci_n_boot: int = IR_CI_BOOT,
+    ci_alpha: float = IR_CI_ALPHA,
+    ci_seed: int = IR_CI_SEED,
     **wf_kwargs,
 ) -> dict:
     """Sweep costs on one fixed walk-forward book and benchmark cost model."""
@@ -596,8 +801,22 @@ def transaction_cost_sensitivity(
             )
         benchmark = buy_hold_equal_weight_benchmark(panel, wf['oos_returns'].index, cost=cost)
         active = active_oos_returns(wf['oos_returns'], benchmark['ret'])
-        active_ir = information_ratio(active)
-        verdict = validation_verdict(wf['oos_metrics']['sharpe'], active_ir, len(wf['folds']))
+        active_ir, ci_lower, ci_upper, ir_se = information_ratio_ci(
+            active,
+            block=ci_block,
+            n_boot=ci_n_boot,
+            alpha=ci_alpha,
+            seed=ci_seed,
+        )
+        selection_bar = expected_max_ir_under_null(n_trials, ir_se)
+        verdict = validation_verdict(
+            wf['oos_metrics']['sharpe'],
+            active_ir,
+            len(wf['folds']),
+            ci_lower=ci_lower,
+            ci_upper=ci_upper,
+            selection_threshold=selection_bar,
+        )
         strategy_events = int((wf['turnover'] > 1e-9).sum())
         strategy_turnover_mean = float(wf['turnover'].mean()) if len(wf['turnover']) else 0.0
         benchmark_turnover_mean = float(benchmark['turnover'].mean()) if len(benchmark) else 0.0
@@ -608,6 +827,10 @@ def transaction_cost_sensitivity(
             'cost': cost,
             'sharpe': wf['oos_metrics']['sharpe'],
             'active_ir': active_ir,
+            'information_ratio_ci_lower': ci_lower,
+            'information_ratio_ci_upper': ci_upper,
+            'information_ratio_se': ir_se,
+            'selection_expected_max_ir': selection_bar,
             'active_mean_return': float(active.mean()) if len(active) else 0.0,
             'verdict': verdict,
             'strategy_turnover_mean': strategy_turnover_mean,
@@ -633,6 +856,7 @@ def transaction_cost_sensitivity(
         'break_even_bps': breakeven,
         'active_ir_warnings': ir_warnings,
         'selection_cost_bps': float(selection_cost) * 10_000.0,
+        'selection_trials': int(n_trials),
     }
 
 
@@ -740,6 +964,15 @@ def main() -> None:
         help='Minimum non-NaN ticker coverage before validation (default: 0.60)',
     )
     parser.add_argument(
+        '--n-trials',
+        type=int,
+        default=DEFAULT_SELECTION_TRIALS,
+        help=(
+            'Selection-adjustment trial count for the expected max null IR '
+            f'(default: {DEFAULT_SELECTION_TRIALS}; rough presets x universes x parameter families explored)'
+        ),
+    )
+    parser.add_argument(
         '--warmup', type=int, default=None,
         help=f'Warmup bars before test window (default: {WARMUP})',
     )
@@ -802,6 +1035,7 @@ def main() -> None:
         GRID,
         show_fold_ranks=args.show_fold_ranks,
         book=args.book,
+        n_trials=args.n_trials,
         train=args.train,
         test=args.test,
         warmup=warmup,

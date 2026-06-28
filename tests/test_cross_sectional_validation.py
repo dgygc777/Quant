@@ -13,6 +13,7 @@ from validate_cross_sectional import (
     VERDICT_EDGE,
     VERDICT_FAILS,
     VERDICT_MATCHES,
+    expected_max_ir_under_null,
     filter_panel_by_coverage,
     information_ratio,
     report_panel_validation,
@@ -48,11 +49,42 @@ class TestCrossSectionalValidation(unittest.TestCase):
         self.assertTrue(dropped.empty)
 
     def test_benchmark_relative_verdict_requires_active_edge(self):
-        self.assertEqual(validation_verdict(1.60, 0.40, folds=8), VERDICT_EDGE)
-        self.assertEqual(validation_verdict(1.00, 0.02, folds=8), VERDICT_MATCHES)
-        self.assertEqual(validation_verdict(1.00, -0.40, folds=8), VERDICT_FAILS)
-        self.assertNotEqual(validation_verdict(1.00, -0.40, folds=8), VERDICT_EDGE)
-        self.assertEqual(validation_verdict(-0.10, 1.00, folds=12), VERDICT_FAILS)
+        self.assertEqual(
+            validation_verdict(
+                1.60, 0.80, folds=8,
+                ci_lower=0.35, ci_upper=1.20, selection_threshold=0.30,
+            ),
+            VERDICT_EDGE,
+        )
+        self.assertEqual(
+            validation_verdict(
+                1.00, 0.40, folds=8,
+                ci_lower=-0.05, ci_upper=0.80, selection_threshold=0.30,
+            ),
+            VERDICT_MATCHES,
+        )
+        self.assertEqual(
+            validation_verdict(
+                1.00, -0.40, folds=8,
+                ci_lower=-0.80, ci_upper=-0.05, selection_threshold=0.30,
+            ),
+            VERDICT_FAILS,
+        )
+        self.assertNotEqual(
+            validation_verdict(
+                1.00, 0.40, folds=8,
+                ci_lower=-0.05, ci_upper=0.80, selection_threshold=0.30,
+            ),
+            VERDICT_EDGE,
+        )
+        self.assertEqual(
+            validation_verdict(
+                -0.10, 1.00, folds=12,
+                ci_lower=0.70, ci_upper=1.30, selection_threshold=0.30,
+            ),
+            VERDICT_FAILS,
+        )
+        self.assertGreater(expected_max_ir_under_null(20, 0.20), 0.0)
 
     def test_information_ratio_handles_zero_variance_spread(self):
         idx = pd.bdate_range('2025-01-01', periods=20)
@@ -76,6 +108,8 @@ class TestCrossSectionalValidation(unittest.TestCase):
                 'synthetic validation',
                 panel,
                 {'lookback': [5], 'skip': [0], 'top_frac': [0.4], 'rebalance': [5]},
+                n_trials=10,
+                ci_n_boot=200,
                 train=30,
                 test=10,
                 warmup=5,
@@ -86,10 +120,14 @@ class TestCrossSectionalValidation(unittest.TestCase):
         self.assertIn('Equal-weight benchmark OOS', out)
         self.assertIn('Active OOS Sharpe (strategy - benchmark)', out)
         self.assertIn('Information ratio (active-return OOS)', out)
+        self.assertIn('Selection-adjusted bar', out)
+        self.assertIn('Benchmark correlation', out)
         self.assertIn('Validation verdict:', out)
         self.assertIn('benchmark_oos_metrics', wf)
         self.assertIn('active_oos_sharpe', wf)
         self.assertIn('information_ratio', wf)
+        self.assertIn('information_ratio_ci_lower', wf)
+        self.assertIn('selection_expected_max_ir', wf)
         self.assertIn('validation_verdict', wf)
 
 

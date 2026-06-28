@@ -71,6 +71,7 @@ from quant.momentum_presets import (
 
 DEFAULT_COST = 0.0005
 DEFAULT_COST_BPS = 10.0
+DEFAULT_SELECTION_TRIALS = 20
 MIN_RISK_REVIEW_NAMES = 6
 
 
@@ -103,6 +104,8 @@ def add_portfolio_params(p: argparse.ArgumentParser) -> None:
     p.add_argument('--years', type=int, default=5)
     p.add_argument('--cost-bps', type=float, default=DEFAULT_COST_BPS,
                    help='Round-trip transaction cost in bps for portfolio comparison/validation (default 10)')
+    p.add_argument('--n-trials', type=int, default=DEFAULT_SELECTION_TRIALS,
+                   help='Selection-adjustment trial count for validation CI gate (default 20)')
     p.add_argument('--top-frac', type=float, default=DEFAULT_TOP_FRAC,
                    help=f'Fraction long / short per leg (default {DEFAULT_TOP_FRAC})')
     p.add_argument('--rebalance', type=int, default=5,
@@ -420,11 +423,14 @@ def _print_wf_validation(
     momentum_preset: str = 'custom',
     headline_cost: float = DEFAULT_COST,
     headline_cost_bps: float | None = None,
+    n_trials: int = DEFAULT_SELECTION_TRIALS,
 ) -> dict | None:
     from validate_cross_sectional import (
+        ACTIVE_IR_EDGE_MARGIN,
         COST_SWEEP_BPS,
         GRID,
         MIN_VALIDATION_NAMES,
+        VERDICT_MATCHES,
         WARMUP,
         compare_weighting_validation,
         print_weighting_validation_report,
@@ -454,6 +460,7 @@ def _print_wf_validation(
         GRID,
         book='long_only',
         cost=headline_cost,
+        n_trials=n_trials,
         train=train,
         test=test,
         warmup=WARMUP,
@@ -470,6 +477,7 @@ def _print_wf_validation(
         GRID,
         cost_bps_levels=sweep_levels,
         selection_cost=headline_cost,
+        n_trials=n_trials,
         train=train,
         test=test,
         warmup=WARMUP,
@@ -512,6 +520,25 @@ def _print_wf_validation(
             'Self-check: WARNING - cost sweep headline row diverges from '
             f"main long-only OOS Sharpe ({sweep_sharpe} vs {oos['sharpe']:.6f})."
         )
+    point_ir = wf.get('information_ratio')
+    ci_lower = wf.get('information_ratio_ci_lower')
+    ci_gate_case = (
+        point_ir is not None
+        and ci_lower is not None
+        and not pd.isna(point_ir)
+        and not pd.isna(ci_lower)
+        and float(point_ir) > ACTIVE_IR_EDGE_MARGIN
+        and float(ci_lower) <= ACTIVE_IR_EDGE_MARGIN
+    )
+    if ci_gate_case:
+        if wf.get('validation_verdict') != VERDICT_MATCHES:
+            raise AssertionError(
+                'CI gate invariant failed: point IR clears margin but CI lower does not, '
+                f"yet verdict is {wf.get('validation_verdict')!r}."
+            )
+        print('Self-check: OK - point IR clears margin but CI lower does not, so verdict stays MATCHES.')
+    else:
+        print('Self-check: OK - CI gate invariant armed for point-estimate-only edges.')
     return {
         'folds': len(wf['folds']),
         'oos_sharpe': oos['sharpe'],
@@ -522,7 +549,14 @@ def _print_wf_validation(
         'benchmark_oos_max_dd': wf.get('benchmark_oos_metrics', {}).get('max_dd'),
         'active_oos_sharpe': wf.get('active_oos_sharpe'),
         'information_ratio': wf.get('information_ratio'),
+        'information_ratio_ci_lower': wf.get('information_ratio_ci_lower'),
+        'information_ratio_ci_upper': wf.get('information_ratio_ci_upper'),
+        'information_ratio_se': wf.get('information_ratio_se'),
+        'selection_expected_max_ir': wf.get('selection_expected_max_ir'),
+        'selection_trials': wf.get('selection_trials'),
+        'benchmark_correlation': wf.get('benchmark_correlation'),
         'validation_verdict': wf.get('validation_verdict'),
+        'validation_verdict_reason': wf.get('validation_verdict_reason'),
         'sizing_validation': sizing_validation,
         'winning_weighting': sizing_validation.get('best_weighting'),
         'risk_parity_beats_equal': sizing_validation.get('risk_parity_beats_equal'),
@@ -754,6 +788,11 @@ def _buy_strategy_conclusion(
     benchmark_oos_sharpe = validation_stats.get('benchmark_oos_sharpe') if validation_stats else None
     active_oos_sharpe = validation_stats.get('active_oos_sharpe') if validation_stats else None
     active_ir = validation_stats.get('information_ratio') if validation_stats else None
+    active_ir_ci_lower = validation_stats.get('information_ratio_ci_lower') if validation_stats else None
+    active_ir_ci_upper = validation_stats.get('information_ratio_ci_upper') if validation_stats else None
+    selection_bar = validation_stats.get('selection_expected_max_ir') if validation_stats else None
+    selection_trials = validation_stats.get('selection_trials') if validation_stats else None
+    verdict_reason = validation_stats.get('validation_verdict_reason') if validation_stats else None
     winning_weighting = validation_stats.get('winning_weighting') if validation_stats else None
     risk_parity_beats_equal = validation_stats.get('risk_parity_beats_equal') if validation_stats else None
     headline_cost_bps = validation_stats.get('headline_cost_bps') if validation_stats else None
@@ -772,11 +811,21 @@ def _buy_strategy_conclusion(
         break_even_desc = f'break-even cost: ~{_fmt_float(break_even_cost_bps)} bps'
     verdict = validation_stats.get('validation_verdict') if validation_stats else 'FAILS'
     validation_edge = verdict == 'EDGE'
+    ir_evidence = f"active-return IR {_fmt_float(active_ir)}"
+    if active_ir_ci_lower is not None or active_ir_ci_upper is not None:
+        ir_evidence += (
+            f" [95% CI {_fmt_float(active_ir_ci_lower)}, {_fmt_float(active_ir_ci_upper)}]"
+        )
+    if selection_bar is not None:
+        trials_desc = f"N={selection_trials}" if selection_trials is not None else 'N=n/a'
+        ir_evidence += f", selection bar {_fmt_float(selection_bar)} ({trials_desc})"
+    if verdict_reason:
+        ir_evidence += f", reason: {verdict_reason}"
     if validation_edge:
         validation_desc = (
             f"Validation verdict EDGE {cost_context}: strategy OOS Sharpe {_fmt_float(oos_sharpe)} vs "
             f"equal-weight benchmark {_fmt_float(benchmark_oos_sharpe)} "
-            f"(Sharpe spread {_fmt_float(active_oos_sharpe)}, active-return IR {_fmt_float(active_ir)}), "
+            f"(Sharpe spread {_fmt_float(active_oos_sharpe)}, {ir_evidence}), "
             f"ann return {_fmt_pct(oos_ann_return)}, max DD {_fmt_pct(oos_max_dd)} "
             f"over {folds} folds; {break_even_desc}."
         )
@@ -784,7 +833,7 @@ def _buy_strategy_conclusion(
         validation_desc = (
             f"Validation verdict {verdict} {cost_context}: strategy OOS Sharpe {_fmt_float(oos_sharpe)} vs "
             f"benchmark {_fmt_float(benchmark_oos_sharpe)} "
-            f"(Sharpe spread {_fmt_float(active_oos_sharpe)}, active-return IR {_fmt_float(active_ir)}), "
+            f"(Sharpe spread {_fmt_float(active_oos_sharpe)}, {ir_evidence}), "
             f"max DD {_fmt_pct(oos_max_dd)}, "
             f"folds {folds}; {break_even_desc}; this is a research candidate that does not beat the basket."
         )
@@ -793,7 +842,7 @@ def _buy_strategy_conclusion(
             f"Validation verdict FAILS {cost_context}: the ranking has no validated benchmark-relative edge "
             f"(strategy OOS Sharpe {_fmt_float(oos_sharpe)} vs benchmark "
             f"{_fmt_float(benchmark_oos_sharpe)}, Sharpe spread {_fmt_float(active_oos_sharpe)}, "
-            f"active-return IR {_fmt_float(active_ir)}, "
+            f"{ir_evidence}, "
             f"max DD {_fmt_pct(oos_max_dd)}, folds {folds}; {break_even_desc}), so the momentum list is a "
             f"research/watchlist candidate screen only."
         )
@@ -991,6 +1040,7 @@ def cmd_portfolio_compare(args) -> None:
             momentum_preset=xs_params['momentum_preset'],
             headline_cost=strategy_cost,
             headline_cost_bps=getattr(args, 'cost_bps', DEFAULT_COST * 10_000),
+            n_trials=getattr(args, 'n_trials', DEFAULT_SELECTION_TRIALS),
         )
     weights = None
     scores = None

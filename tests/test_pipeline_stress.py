@@ -69,13 +69,37 @@ class TestPipelineStress(unittest.TestCase):
     def test_information_ratio_verdicts_on_hand_built_cases(self):
         idx = pd.bdate_range('2025-01-01', periods=40)
         matches_ir = information_ratio(pd.Series([0.001, -0.001] * 20, index=idx))
-        edge_ir = information_ratio(pd.Series(0.0005, index=idx))
-        fail_ir = information_ratio(pd.Series(-0.0005, index=idx))
+        edge_ir = 0.80
+        fail_ir = -0.50
 
-        self.assertEqual(validation_verdict(1.0, matches_ir, folds=8), VERDICT_MATCHES)
-        self.assertEqual(validation_verdict(1.0, edge_ir, folds=8), VERDICT_EDGE)
-        self.assertEqual(validation_verdict(1.0, fail_ir, folds=8), VERDICT_FAILS)
-        self.assertEqual(validation_verdict(-0.1, edge_ir, folds=8), VERDICT_FAILS)
+        self.assertEqual(
+            validation_verdict(
+                1.0, matches_ir, folds=8,
+                ci_lower=-0.10, ci_upper=0.10, selection_threshold=0.20,
+            ),
+            VERDICT_MATCHES,
+        )
+        self.assertEqual(
+            validation_verdict(
+                1.0, edge_ir, folds=8,
+                ci_lower=0.40, ci_upper=1.10, selection_threshold=0.30,
+            ),
+            VERDICT_EDGE,
+        )
+        self.assertEqual(
+            validation_verdict(
+                1.0, fail_ir, folds=8,
+                ci_lower=-0.90, ci_upper=-0.10, selection_threshold=0.20,
+            ),
+            VERDICT_FAILS,
+        )
+        self.assertEqual(
+            validation_verdict(
+                -0.1, edge_ir, folds=8,
+                ci_lower=0.40, ci_upper=1.10, selection_threshold=0.30,
+            ),
+            VERDICT_FAILS,
+        )
 
     def test_coverage_propagates_to_validation_risk_and_actionable(self):
         panel = synthetic_panel(n_days=100, n_assets=6)
@@ -180,6 +204,7 @@ class TestPipelineStress(unittest.TestCase):
 
         self.assertIsNotNone(stats)
         self.assertIn('Information ratio (active-return OOS)', out)
+        self.assertIn('Selection-adjusted bar', out)
         self.assertIn('=== Sizing-scheme OOS validation (long-only book) ===', out)
         self.assertIn('Self-check: OK', out)
 

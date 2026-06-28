@@ -128,6 +128,7 @@ class TestTransactionCosts(unittest.TestCase):
             panel,
             grid,
             cost_bps_levels=[0, 10, 20, 40],
+            ci_n_boot=200,
             train=80,
             test=20,
             warmup=30,
@@ -151,6 +152,7 @@ class TestTransactionCosts(unittest.TestCase):
             panel,
             grid,
             cost_bps_levels=[0, 10],
+            ci_n_boot=200,
             **wf_kwargs,
         )
         row0 = summary['rows'][0]
@@ -178,6 +180,7 @@ class TestTransactionCosts(unittest.TestCase):
             grid,
             cost_bps_levels=[0, 10, 20],
             selection_cost=headline_cost,
+            ci_n_boot=200,
             **wf_kwargs,
         )
         row10 = next(row for row in summary['rows'] if row['cost_bps'] == 10.0)
