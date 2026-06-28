@@ -12,7 +12,7 @@ import json
 import os
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import anthropic
 import edgar
@@ -25,6 +25,7 @@ from quant.risk_extraction import (
     extract_risk_section_detail,
     looks_like_risk_factors,
     risk_cue_count,
+    select_quarterly_comparison_sections,
 )
 
 def _configure_edgar() -> None:
@@ -45,6 +46,7 @@ CACHE_PATH = 'tenk_cache.json'
 DEFAULT_MODEL = 'claude-haiku-4-5-20251001'
 BASE_ANNUAL_FORMS = frozenset({'10-K', '20-F'})
 AMENDMENT_FORMS = frozenset({'10-K/A', '20-F/A'})
+QUARTERLY_FORMS = frozenset({'10-Q'})
 
 FALLBACK_TICKERS = [
     'NVDA', 'AMD', 'AVGO', 'QCOM', 'MU', 'INTC', 'MRVL', 'AMAT', 'LRCX', 'KLAC',
@@ -117,6 +119,38 @@ def _filing_form(filing) -> str:
     return str(form).upper() if form else '10-K'
 
 
+def _filing_period_str(filing) -> str | None:
+    for attr in (
+        'period_of_report',
+        'period',
+        'report_date',
+        'period_end',
+        'document_period_end_date',
+    ):
+        val = getattr(filing, attr, None)
+        if callable(val):
+            try:
+                val = val()
+            except Exception:
+                val = None
+        if val:
+            return str(val)
+    return None
+
+
+def _parse_date(raw: str | None):
+    if not raw or str(raw).lower() == 'unknown':
+        return None
+    try:
+        return datetime.strptime(str(raw)[:10], '%Y-%m-%d').date()
+    except ValueError:
+        return None
+
+
+def _date_quarter(dt) -> int:
+    return (dt.month - 1) // 3 + 1
+
+
 def _iter_recent_filings(filings, max_n: int = 12):
     if filings is None:
         return
@@ -140,6 +174,96 @@ def _is_valid_annual_form(form: str, include_amendments: bool) -> bool:
     if include_amendments:
         return form in BASE_ANNUAL_FORMS or form in AMENDMENT_FORMS
     return form in BASE_ANNUAL_FORMS
+
+
+def _is_valid_quarterly_form(form: str) -> bool:
+    return str(form or '').upper().strip() in QUARTERLY_FORMS
+
+
+def _quarterly_record_from_filing(filing) -> dict:
+    return {
+        'filing_date': _filing_date_str(filing),
+        'full_text': _filing_text(filing),
+        'form': _filing_form(filing),
+        'period': _filing_period_str(filing),
+    }
+
+
+def _select_quarterly_pair(records: list[dict]) -> dict:
+    """Choose latest 10-Q and its seasonality-controlled comparison filing."""
+    usable = [
+        dict(record)
+        for record in records
+        if record.get('full_text') and _parse_date(record.get('filing_date')) is not None
+    ]
+    usable.sort(key=lambda record: _parse_date(record.get('filing_date')), reverse=True)
+    if len(usable) < 2:
+        return {
+            'ok': False,
+            'reason': 'insufficient filings',
+            'records': usable,
+        }
+
+    latest = usable[0]
+    latest_date = _parse_date(latest.get('filing_date'))
+    latest_period = _parse_date(latest.get('period'))
+    prior = None
+    match_method = None
+    comparison_type = None
+
+    if latest_period is not None:
+        fiscal_matches = []
+        for record in usable[1:]:
+            period = _parse_date(record.get('period'))
+            if period is None:
+                continue
+            if period.year == latest_period.year - 1 and _date_quarter(period) == _date_quarter(latest_period):
+                fiscal_matches.append(record)
+        if fiscal_matches:
+            target = latest_period.replace(year=latest_period.year - 1)
+            prior = min(
+                fiscal_matches,
+                key=lambda record: abs((_parse_date(record.get('period')) - target).days),
+            )
+            match_method = 'fiscal_period'
+            comparison_type = 'year_over_year'
+
+    if prior is None and latest_date is not None:
+        target = latest_date - timedelta(days=365)
+        window_matches = []
+        for record in usable[1:]:
+            filing_date = _parse_date(record.get('filing_date'))
+            if filing_date is None:
+                continue
+            delta = (latest_date - filing_date).days
+            if 300 <= delta <= 430:
+                window_matches.append(record)
+        if window_matches:
+            prior = min(
+                window_matches,
+                key=lambda record: abs((_parse_date(record.get('filing_date')) - target).days),
+            )
+            match_method = 'day_window'
+            comparison_type = 'year_over_year'
+
+    if prior is None:
+        prior = usable[1]
+        match_method = 'sequential'
+        comparison_type = 'sequential'
+
+    return {
+        'ok': True,
+        'current_filing_date': latest.get('filing_date'),
+        'prior_filing_date': prior.get('filing_date'),
+        'current_full_text': latest.get('full_text', ''),
+        'prior_full_text': prior.get('full_text', ''),
+        'current_form': latest.get('form', '10-Q'),
+        'prior_form': prior.get('form', '10-Q'),
+        'current_period': latest.get('period'),
+        'prior_period': prior.get('period'),
+        'comparison_type': comparison_type,
+        'match_method': match_method,
+    }
 
 
 def fetch_two_annuals(
@@ -172,44 +296,111 @@ def fetch_two_annuals(
         return []
 
 
-def debug_extract(ticker: str, *, include_amendments: bool = False) -> None:
-    sym = ticker.upper()
-    print(f'=== debug extract: {sym} ===\n')
-    annuals = fetch_two_annuals(sym, include_amendments=include_amendments)
-    if not annuals:
-        print('No filings fetched (check ticker or EDGAR connectivity).')
-        return
-    if len(annuals) < 2:
-        print(f'Only {len(annuals)} filing(s) found; need two for year-over-year compare.')
+def fetch_two_quarterlies(ticker: str) -> dict:
+    """Return latest 10-Q and seasonality-controlled comparison metadata."""
+    try:
+        company = edgar.Company(ticker)
+        filings = company.get_filings(form=['10-Q'])
+        if filings is None:
+            return {'ok': False, 'reason': 'insufficient filings', 'records': []}
 
-    labels = ['current (newest)', 'prior']
-    details: list[RiskExtraction] = []
-    for i, (filing_date, full_text, form) in enumerate(annuals[:2]):
-        label = labels[i] if i < len(labels) else f'filing_{i}'
-        detail = extract_risk_section_detail(full_text, form)
-        details.append(detail)
-        print(f'--- {label}: {filing_date} ({form}) ---')
-        print(f'  full text length : {len(full_text):,}')
+        records: list[dict] = []
+        for filing in _iter_recent_filings(filings, max_n=16):
+            form = _filing_form(filing)
+            if not _is_valid_quarterly_form(form):
+                continue
+            record = _quarterly_record_from_filing(filing)
+            if record.get('full_text'):
+                records.append(record)
+        time.sleep(0.3)
+        return _select_quarterly_pair(records)
+    except Exception as exc:
+        return {'ok': False, 'reason': f'fetch error: {exc}', 'records': []}
+
+
+def debug_extract(
+    ticker: str,
+    *,
+    include_amendments: bool = False,
+    filing_type: str = 'annual',
+) -> None:
+    sym = ticker.upper()
+    print(f'=== debug extract: {sym} ({filing_type}) ===\n')
+
+    if filing_type in {'annual', 'both'}:
+        annuals = fetch_two_annuals(sym, include_amendments=include_amendments)
+    else:
+        annuals = []
+    if not annuals:
+        if filing_type in {'annual', 'both'}:
+            print('No annual filings fetched (check ticker or EDGAR connectivity).')
+    else:
+        if len(annuals) < 2:
+            print(f'Only {len(annuals)} annual filing(s) found; need two for year-over-year compare.')
+
+        labels = ['current (newest)', 'prior']
+        details: list[RiskExtraction] = []
+        for i, (filing_date, full_text, form) in enumerate(annuals[:2]):
+            label = labels[i] if i < len(labels) else f'filing_{i}'
+            detail = extract_risk_section_detail(full_text, form)
+            details.append(detail)
+            print(f'--- annual {label}: {filing_date} ({form}) ---')
+            print(f'  full text length : {len(full_text):,}')
+            print(f'  extracted length : {len(detail.section):,}')
+            print(f'  start/end offset : {detail.start} / {detail.end}')
+            print(f'  quality score    : {detail.quality_score:.1f}')
+            print(f'  risk cue count   : {detail.cue_count}')
+            print(f'  looks_like_risk  : {detail.ok}')
+            if detail.reject_reason:
+                print(f'  reject reason    : {detail.reject_reason}')
+            print(f'  heading preview  : {detail.heading_preview!r}')
+            print()
+
+        if len(annuals) >= 2:
+            f0, f1 = annuals[0][2], annuals[1][2]
+            if f0 != f1:
+                print(f'WARNING: form mismatch ({f1} vs {f0}) — YoY compare may be unreliable.')
+            both_ok = details[0].ok and details[1].ok
+            print(f'Comparable for scoring: {both_ok}')
+            if not both_ok:
+                for label, detail in zip(labels, details):
+                    if not detail.ok:
+                        print(f'  NOT comparable ({label}): {detail.reject_reason}')
+
+    if filing_type not in {'quarterly', 'both'}:
+        return
+
+    pair = fetch_two_quarterlies(sym)
+    if not pair.get('ok'):
+        print(f'No comparable quarterly filings fetched: {pair.get("reason", "unknown")}.')
+        return
+
+    selection = select_quarterly_comparison_sections(
+        pair['prior_full_text'],
+        pair['current_full_text'],
+    )
+    print()
+    print(
+        f"Quarterly pair: {pair['current_filing_date']} vs {pair['prior_filing_date']} "
+        f"({pair['comparison_type']}, {pair['match_method']})"
+    )
+    print(f'Coordinated section: {selection.section_used or "non-comparable sections"}')
+    print(f'Candidate lengths: {selection.candidate_lengths}')
+    for label, detail in [
+        ('quarterly current', selection.current_detail),
+        ('quarterly prior', selection.prior_detail),
+    ]:
+        print(f'--- {label}: {detail.form} ---')
         print(f'  extracted length : {len(detail.section):,}')
+        print(f'  section used     : {detail.section_used}')
         print(f'  start/end offset : {detail.start} / {detail.end}')
         print(f'  quality score    : {detail.quality_score:.1f}')
         print(f'  risk cue count   : {detail.cue_count}')
-        print(f'  looks_like_risk  : {detail.ok}')
+        print(f'  comparable       : {detail.ok}')
         if detail.reject_reason:
             print(f'  reject reason    : {detail.reject_reason}')
         print(f'  heading preview  : {detail.heading_preview!r}')
         print()
-
-    if len(annuals) >= 2:
-        f0, f1 = annuals[0][2], annuals[1][2]
-        if f0 != f1:
-            print(f'WARNING: form mismatch ({f1} vs {f0}) — YoY compare may be unreliable.')
-        both_ok = details[0].ok and details[1].ok
-        print(f'Comparable for scoring: {both_ok}')
-        if not both_ok:
-            for label, detail in zip(labels, details):
-                if not detail.ok:
-                    print(f'  NOT comparable ({label}): {detail.reject_reason}')
 
 
 def _is_failed_cache(entry: dict) -> bool:
@@ -221,6 +412,22 @@ def _is_failed_cache(entry: dict) -> bool:
     if entry.get('change_score') is None and summary in {'parse error', ''}:
         return True
     return summary.startswith(('parse error', 'API error', 'error:'))
+
+
+def _cache_source(entry: dict | None) -> str:
+    if not isinstance(entry, dict):
+        return 'annual'
+    return str(entry.get('source') or 'annual').lower()
+
+
+def _is_cache_usable(entry: dict | None, *, force: bool, source: str) -> bool:
+    return (
+        entry is not None
+        and not force
+        and _cache_source(entry) == source
+        and not _is_failed_cache(entry)
+        and entry.get('ok', True)
+    )
 
 
 def _response_text(msg) -> str:
@@ -279,6 +486,9 @@ def score_change(
     prior_detail: RiskExtraction,
     current_detail: RiskExtraction,
     model: str,
+    *,
+    source: str = 'annual',
+    section_used: str | None = None,
 ) -> dict:
     if not prior_detail.ok or not current_detail.ok:
         return {
@@ -289,20 +499,40 @@ def score_change(
         }
 
     client = anthropic.Anthropic()
-    prompt = (
-        'Compare the PRIOR-year vs CURRENT-year risk-factor excerpts below.\n'
-        'Respond with ONLY a JSON object (no prose, no markdown fences) with keys:\n'
-        '  "change_score": float from -1.0 to +1.0 '
-        '(NEGATIVE = added/strengthened risk vs prior; POSITIVE = risk eased; 0 = unchanged)\n'
-        '  "summary": one sentence on what changed\n'
-        '  "confidence": float 0.0 to 1.0\n'
-        '  "non_comparable_reason": null or short string if excerpts are not true risk sections\n'
-        'If either excerpt is not a Risk Factors section, return '
-        '{"change_score": null, "summary": "non-comparable excerpts", '
-        '"confidence": 0.0, "non_comparable_reason": "..."}.\n\n'
-        f'PRIOR YEAR:\n{prior_detail.section[:RISK_CAP]}\n\n'
-        f'CURRENT YEAR:\n{current_detail.section[:RISK_CAP]}'
-    )
+    if source == 'quarterly':
+        section_label = 'MD&A' if section_used == 'mda_both' else 'Risk Factors'
+        prompt = (
+            f'Compare the PRIOR vs CURRENT quarterly 10-Q {section_label} excerpts below.\n'
+            'Focus on material changes in risk posture, business pressure, liquidity, '
+            'demand, regulation, supply chain, customer concentration, and management tone. '
+            'Treat "no material changes" language as approximately unchanged, not as an error.\n'
+            'Respond with ONLY a JSON object (no prose, no markdown fences) with keys:\n'
+            '  "change_score": float from -1.0 to +1.0 '
+            '(NEGATIVE = added/strengthened risk vs prior; POSITIVE = risk eased; 0 = unchanged)\n'
+            '  "summary": one sentence on what changed\n'
+            '  "confidence": float 0.0 to 1.0\n'
+            '  "non_comparable_reason": null or short string if excerpts are not comparable\n'
+            'If the excerpts are not the same kind of section, return '
+            '{"change_score": null, "summary": "non-comparable sections", '
+            '"confidence": 0.0, "non_comparable_reason": "..."}.\n\n'
+            f'PRIOR QUARTERLY SECTION:\n{prior_detail.section[:RISK_CAP]}\n\n'
+            f'CURRENT QUARTERLY SECTION:\n{current_detail.section[:RISK_CAP]}'
+        )
+    else:
+        prompt = (
+            'Compare the PRIOR-year vs CURRENT-year risk-factor excerpts below.\n'
+            'Respond with ONLY a JSON object (no prose, no markdown fences) with keys:\n'
+            '  "change_score": float from -1.0 to +1.0 '
+            '(NEGATIVE = added/strengthened risk vs prior; POSITIVE = risk eased; 0 = unchanged)\n'
+            '  "summary": one sentence on what changed\n'
+            '  "confidence": float 0.0 to 1.0\n'
+            '  "non_comparable_reason": null or short string if excerpts are not true risk sections\n'
+            'If either excerpt is not a Risk Factors section, return '
+            '{"change_score": null, "summary": "non-comparable excerpts", '
+            '"confidence": 0.0, "non_comparable_reason": "..."}.\n\n'
+            f'PRIOR YEAR:\n{prior_detail.section[:RISK_CAP]}\n\n'
+            f'CURRENT YEAR:\n{current_detail.section[:RISK_CAP]}'
+        )
     try:
         msg = client.messages.create(
             model=model,
@@ -350,6 +580,7 @@ def run(
     universe: str | None = None,
     include_amendments: bool = False,
     cache_path: str = CACHE_PATH,
+    filing_type: str = 'annual',
 ) -> None:
     if not os.environ.get('ANTHROPIC_API_KEY'):
         print('Set ANTHROPIC_API_KEY first')
@@ -363,69 +594,168 @@ def run(
     cache = load_cache(cache_path)
     rows: list[dict] = []
 
+    do_annual = filing_type in {'annual', 'both'}
+    do_quarterly = filing_type in {'quarterly', 'both'}
+
     for ticker in tickers:
         sym = ticker.upper()
-        try:
-            annuals = fetch_two_annuals(sym, include_amendments=include_amendments)
-        except Exception as exc:
-            print(f'{sym}: fetch error ({exc}), skipping.')
-            continue
+        if do_annual:
+            try:
+                annuals = fetch_two_annuals(sym, include_amendments=include_amendments)
+            except Exception as exc:
+                print(f'{sym}: annual fetch error ({exc}), skipping.')
+                annuals = []
 
-        if len(annuals) < 2:
-            print(f'{sym}: fewer than two base 10-K/20-F filings, skipping.')
-            continue
+            if len(annuals) < 2:
+                print(f'{sym}: fewer than two base 10-K/20-F filings, skipping annual.')
+            else:
+                current_date, current_full, current_form = annuals[0]
+                prior_date, prior_full, prior_form = annuals[1]
+                cache_key = f'{sym}:{current_date}'
+                cached = cache.get(cache_key)
+                use_cache = _is_cache_usable(cached, force=force, source='annual')
 
-        current_date, current_full, current_form = annuals[0]
-        prior_date, prior_full, prior_form = annuals[1]
-        cache_key = f'{sym}:{current_date}'
-        cached = cache.get(cache_key)
-        use_cache = (
-            cached is not None
-            and not force
-            and not _is_failed_cache(cached)
-            and cached.get('ok', True)
-        )
+                prior_detail = extract_risk_section_detail(prior_full, prior_form)
+                current_detail = extract_risk_section_detail(current_full, current_form)
+                extraction_ok = prior_detail.ok and current_detail.ok
 
-        prior_detail = extract_risk_section_detail(prior_full, prior_form)
-        current_detail = extract_risk_section_detail(current_full, current_form)
-        extraction_ok = prior_detail.ok and current_detail.ok
+                if not extraction_ok:
+                    print(f'{sym}: annual extraction unreliable for {current_date}, not scoring.')
+                    result = {'change_score': None, 'summary': EXTRACTION_FAIL_SUMMARY, 'ok': False}
+                elif use_cache:
+                    result = cached
+                    print(f'{sym}: using cached annual score for {current_date}')
+                else:
+                    if force and cached is not None:
+                        print(f'{sym}: re-scoring annual {current_date} (--force)')
+                    result = score_change(
+                        prior_detail,
+                        current_detail,
+                        model,
+                        source='annual',
+                        section_used='risk_factors',
+                    )
+                    result['ok'] = result.get('change_score') is not None
+                    cache[cache_key] = {
+                        'source': 'annual',
+                        'comparison_type': 'year_over_year',
+                        'section_used': 'risk_factors',
+                        'match_method': 'annual_pair',
+                        'change_score': result.get('change_score'),
+                        'summary': result.get('summary'),
+                        'confidence': result.get('confidence'),
+                        'non_comparable_reason': result.get('non_comparable_reason'),
+                        'prior_filing_date': prior_date,
+                        'current_filing_date': current_date,
+                        'form': current_form,
+                        'prior_form': prior_form,
+                        'model': model,
+                        'scored_at': datetime.now(timezone.utc).isoformat(),
+                        'extraction_quality': current_detail.quality_score,
+                        'section_preview': current_detail.heading_preview[:500],
+                        'ok': result['ok'],
+                    }
+                    save_cache(cache, cache_path)
+                    print(f'{sym}: scored annual {current_date} ({current_form}) vs {prior_date} ({prior_form})')
 
-        if not extraction_ok:
-            print(f'{sym}: extraction unreliable for {current_date}, not scoring.')
-            result = {'change_score': None, 'summary': EXTRACTION_FAIL_SUMMARY, 'ok': False}
-        elif use_cache:
-            result = cached
-            print(f'{sym}: using cached score for {current_date}')
-        else:
-            if force and cached is not None:
-                print(f'{sym}: re-scoring {current_date} (--force)')
-            result = score_change(prior_detail, current_detail, model)
-            result['ok'] = result.get('change_score') is not None
-            cache[cache_key] = {
+                rows.append({
+                    'ticker': sym,
+                    'source': 'annual',
+                    'filing_date': current_date,
+                    'comparison_type': 'year_over_year',
+                    'section_used': 'risk_factors',
+                    'match_method': 'annual_pair',
+                    'change_score': result.get('change_score'),
+                    'summary': result.get('summary', ''),
+                    'ok': bool(result.get('ok', False)),
+                })
+
+        if do_quarterly:
+            pair = fetch_two_quarterlies(sym)
+            if not pair.get('ok'):
+                print(f'{sym}: quarterly {pair.get("reason", "insufficient filings")}, skipping.')
+                continue
+
+            current_date = pair['current_filing_date']
+            prior_date = pair['prior_filing_date']
+            current_form = pair.get('current_form', '10-Q')
+            prior_form = pair.get('prior_form', '10-Q')
+            cache_key = f'{sym}:{current_date}'
+            cached = cache.get(cache_key)
+            use_cache = _is_cache_usable(cached, force=force, source='quarterly')
+
+            selection = select_quarterly_comparison_sections(
+                pair['prior_full_text'],
+                pair['current_full_text'],
+            )
+            extraction_ok = selection.ok and selection.section_used is not None
+
+            if not extraction_ok:
+                print(f'{sym}: quarterly non-comparable sections for {current_date}, not scoring.')
+                result = {
+                    'change_score': None,
+                    'summary': 'non-comparable sections',
+                    'confidence': None,
+                    'non_comparable_reason': selection.reject_reason or 'non-comparable sections',
+                    'ok': False,
+                }
+            elif use_cache:
+                result = cached
+                print(
+                    f"{sym}: using cached quarterly score for {current_date} "
+                    f"({result.get('comparison_type', pair['comparison_type'])}, "
+                    f"{result.get('section_used', selection.section_used)})"
+                )
+            else:
+                if force and cached is not None:
+                    print(f'{sym}: re-scoring quarterly {current_date} (--force)')
+                result = score_change(
+                    selection.prior_detail,
+                    selection.current_detail,
+                    model,
+                    source='quarterly',
+                    section_used=selection.section_used,
+                )
+                result['ok'] = result.get('change_score') is not None
+                cache[cache_key] = {
+                    'source': 'quarterly',
+                    'comparison_type': pair['comparison_type'],
+                    'section_used': selection.section_used,
+                    'match_method': pair['match_method'],
+                    'change_score': result.get('change_score'),
+                    'summary': result.get('summary'),
+                    'confidence': result.get('confidence'),
+                    'non_comparable_reason': result.get('non_comparable_reason'),
+                    'prior_filing_date': prior_date,
+                    'current_filing_date': current_date,
+                    'form': current_form,
+                    'prior_form': prior_form,
+                    'current_period': pair.get('current_period'),
+                    'prior_period': pair.get('prior_period'),
+                    'model': model,
+                    'scored_at': datetime.now(timezone.utc).isoformat(),
+                    'extraction_quality': selection.current_detail.quality_score,
+                    'section_preview': selection.current_detail.heading_preview[:500],
+                    'candidate_lengths': selection.candidate_lengths,
+                    'ok': result['ok'],
+                }
+                save_cache(cache, cache_path)
+                print(
+                    f"{sym}: scored quarterly {current_date} ({current_form}) vs {prior_date} ({prior_form}) "
+                    f"[{pair['comparison_type']}, {selection.section_used}]"
+                )
+
+            rows.append({
+                'ticker': sym,
+                'source': 'quarterly',
+                'filing_date': current_date,
+                'comparison_type': pair.get('comparison_type'),
+                'section_used': selection.section_used,
+                'match_method': pair.get('match_method'),
                 'change_score': result.get('change_score'),
-                'summary': result.get('summary'),
-                'confidence': result.get('confidence'),
-                'non_comparable_reason': result.get('non_comparable_reason'),
-                'prior_filing_date': prior_date,
-                'current_filing_date': current_date,
-                'form': current_form,
-                'prior_form': prior_form,
-                'model': model,
-                'scored_at': datetime.now(timezone.utc).isoformat(),
-                'extraction_quality': current_detail.quality_score,
-                'section_preview': current_detail.heading_preview[:500],
-                'ok': result['ok'],
-            }
-            save_cache(cache, cache_path)
-            print(f'{sym}: scored {current_date} ({current_form}) vs {prior_date} ({prior_form})')
-
-        rows.append({
-            'ticker': sym,
-            'filing_date': current_date,
-            'change_score': result.get('change_score'),
-            'summary': result.get('summary', ''),
-            'ok': bool(result.get('ok', False)),
-        })
+                'summary': result.get('summary', ''),
+                'ok': bool(result.get('ok', False)),
+            })
 
     if not rows:
         print('No results.')
@@ -461,6 +791,12 @@ def main() -> None:
     parser.add_argument('--model', default=DEFAULT_MODEL, help='Anthropic model id')
     parser.add_argument('--force', action='store_true', help='Re-score instead of using cache')
     parser.add_argument('--universe', default=None, help='Universe preset when no tickers given')
+    parser.add_argument(
+        '--filing-type',
+        choices=['annual', 'quarterly', 'both'],
+        default='annual',
+        help='Filing source to score: annual, quarterly, or both (default: annual)',
+    )
     parser.add_argument('--include-amendments', action='store_true',
                         help='Include 10-K/A and 20-F/A filings (default: base forms only)')
     parser.add_argument('--debug-extract', metavar='TICKER',
@@ -469,12 +805,17 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.debug_extract:
-        debug_extract(args.debug_extract, include_amendments=args.include_amendments)
+        debug_extract(
+            args.debug_extract,
+            include_amendments=args.include_amendments,
+            filing_type=args.filing_type,
+        )
         return
 
     run(
         args.tickers, args.model, force=args.force, universe=args.universe,
         include_amendments=args.include_amendments, cache_path=args.cache_path,
+        filing_type=args.filing_type,
     )
 
 

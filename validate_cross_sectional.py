@@ -35,8 +35,7 @@ from quant.data_quality import (
     format_coverage as _format_coverage,
 )
 from quant.metrics import metrics
-from quant.combined_signal import backtest_xs_long_only
-from quant.models.cross_sectional import CrossSectionalModel, backtest_xs
+from quant.models.cross_sectional import CrossSectionalModel, DEFAULT_XS_COST, backtest_xs
 from quant.risk_model import WEIGHTING_METHODS
 from quant.universes import DEFAULT_PRESET, get_universe
 from quant.validation import iter_param_grid, optimize_full, walk_forward
@@ -50,6 +49,7 @@ ACTIVE_SHARPE_EDGE_MARGIN = ACTIVE_IR_EDGE_MARGIN
 VERDICT_EDGE = 'EDGE'
 VERDICT_MATCHES = 'MATCHES BENCHMARK — captures sector beta, not alpha'
 VERDICT_FAILS = 'FAILS'
+COST_SWEEP_BPS = [0, 5, 10, 20, 30, 50]
 
 GRID = {
     'lookback': [63, 126, 252],
@@ -73,7 +73,16 @@ def book_description(book: str) -> str:
     return 'LONG/SHORT dollar-neutral book (diagnostic spread, not the default long-only gate)'
 
 
-def make_xs_strategy(book: str = 'long_only', weighting: str = 'equal'):
+def cost_from_bps(cost_bps: float) -> float:
+    """Convert basis points to decimal cost per unit turnover."""
+    return float(cost_bps) / 10_000.0
+
+
+def make_xs_strategy(
+    book: str = 'long_only',
+    weighting: str = 'equal',
+    cost: float | pd.Series = DEFAULT_XS_COST,
+):
     """backtest_xs returns (DataFrame, n_rebalances); strategy returns are strat_net."""
     market_neutral = book_market_neutral(book)
 
@@ -83,6 +92,7 @@ def make_xs_strategy(book: str = 'long_only', weighting: str = 'equal'):
             mode='momentum',
             market_neutral=market_neutral,
             weighting=weighting,
+            cost=cost,
             **kw,
         )[0]['strat_net']
 
@@ -94,20 +104,12 @@ def xs_strat(panel, **kw):
     return make_xs_strategy('long_only')(panel, **kw)
 
 
-def make_weighted_long_only_strategy(weighting: str):
+def make_weighted_long_only_strategy(
+    weighting: str,
+    cost: float | pd.Series = DEFAULT_XS_COST,
+):
     """Strategy adapter for validating long-only weighting schemes."""
-
-    def _strategy(panel, **kw):
-        return backtest_xs_long_only(
-            panel,
-            {
-                'mode': 'momentum',
-                **kw,
-                'weighting': weighting,
-            },
-        )['strat_net']
-
-    return _strategy
+    return make_xs_strategy('long_only', weighting=weighting, cost=cost)
 
 
 def _xs_model_params(grid_params: dict, book: str = 'long_only') -> dict:
@@ -155,6 +157,62 @@ def information_ratio(active_returns: pd.Series) -> float:
             return float('-inf')
         return 0.0
     return mean / std * np.sqrt(252.0)
+
+
+def buy_hold_equal_weight_benchmark(
+    panel: pd.DataFrame,
+    oos_index: pd.Index,
+    cost: float = 0.0,
+) -> pd.DataFrame:
+    """Low-turnover equal-weight buy-and-hold benchmark on OOS dates."""
+    rets = panel.pct_change(fill_method=None).reindex(oos_index).fillna(0.0)
+    if rets.empty or rets.shape[1] == 0:
+        return pd.DataFrame({
+            'ret': pd.Series(dtype=float),
+            'turnover': pd.Series(dtype=float),
+            'cost': pd.Series(dtype=float),
+        })
+
+    weights = pd.Series(1.0 / rets.shape[1], index=rets.columns)
+    rows = []
+    first = True
+    for dt, row in rets.iterrows():
+        turnover = 1.0 if first else 0.0
+        cost_paid = turnover * float(cost)
+        gross = float((weights * row).sum())
+        net = gross - cost_paid
+        rows.append((dt, net, turnover, cost_paid))
+        next_weights = weights * (1.0 + row)
+        total = float(next_weights.sum())
+        if total > 0.0:
+            weights = next_weights / total
+        first = False
+
+    return pd.DataFrame.from_records(
+        rows,
+        columns=['date', 'ret', 'turnover', 'cost'],
+    ).set_index('date')
+
+
+def break_even_cost_bps(cost_bps: list[float], active_irs: list[float]) -> float | None:
+    """Linearly interpolate the first cost where active IR crosses zero."""
+    pairs = [
+        (float(cost), float(ir))
+        for cost, ir in zip(cost_bps, active_irs)
+        if not pd.isna(ir) and np.isfinite(ir)
+    ]
+    if not pairs:
+        return None
+    if pairs[0][1] <= 0.0:
+        return None
+    for (c0, ir0), (c1, ir1) in zip(pairs, pairs[1:]):
+        if ir0 == 0.0:
+            return c0
+        if ir0 > 0.0 and ir1 <= 0.0:
+            if ir0 == ir1:
+                return c1
+            return c0 + (0.0 - ir0) * (c1 - c0) / (ir1 - ir0)
+    return None
 
 
 def validation_verdict(
@@ -257,10 +315,17 @@ def print_oos_fold_ranks(panel: pd.DataFrame, param_grid: dict,
         pos += test
 
 
-def report_panel_validation(name, panel, param_grid, show_fold_ranks: bool = False,
-                            book: str = 'long_only', **wf_kwargs) -> dict:
+def report_panel_validation(
+    name,
+    panel,
+    param_grid,
+    show_fold_ranks: bool = False,
+    book: str = 'long_only',
+    cost: float | pd.Series = DEFAULT_XS_COST,
+    **wf_kwargs,
+) -> dict:
     """Panel walk-forward report — same three rows as quant.validation.report_validation."""
-    strategy_fn = make_xs_strategy(book)
+    strategy_fn = make_xs_strategy(book, cost=cost)
     print(f'\nValidating: {book_description(book)}')
     print(
         f'Validation data context: names={panel.shape[1]} rows={len(panel)} '
@@ -312,14 +377,19 @@ def report_panel_validation(name, panel, param_grid, show_fold_ranks: bool = Fal
     return wf
 
 
-def compare_weighting_validation(panel: pd.DataFrame, param_grid: dict, **wf_kwargs) -> dict:
+def compare_weighting_validation(
+    panel: pd.DataFrame,
+    param_grid: dict,
+    cost: float | pd.Series = DEFAULT_XS_COST,
+    **wf_kwargs,
+) -> dict:
     """Walk-forward validate long-only sizing schemes and the benchmark."""
     rows: dict[str, dict] = {}
     first_oos_index: pd.Index | None = None
     for weighting in WEIGHTING_METHODS:
         try:
             wf = walk_forward(
-                make_weighted_long_only_strategy(weighting),
+                make_weighted_long_only_strategy(weighting, cost=cost),
                 panel,
                 param_grid,
                 **wf_kwargs,
@@ -377,6 +447,243 @@ def compare_weighting_validation(panel: pd.DataFrame, param_grid: dict, **wf_kwa
         'best_weighting': best_weighting,
         'risk_parity_beats_equal': risk_parity_beats_equal,
     }
+
+
+def walk_forward_long_only_with_turnover(
+    panel: pd.DataFrame,
+    param_grid: dict,
+    *,
+    cost: float = DEFAULT_XS_COST,
+    train: int = 252,
+    test: int = 63,
+    warmup: int = WARMUP,
+    select: str = 'sharpe',
+    fixed_folds: list[dict] | None = None,
+) -> dict:
+    """Canonical long-only walk-forward plus fold-matched OOS turnover."""
+    if fixed_folds is None:
+        strategy_fn = make_xs_strategy('long_only', cost=cost)
+        base_wf = walk_forward(
+            strategy_fn,
+            panel,
+            param_grid,
+            train=train,
+            test=test,
+            warmup=warmup,
+            select=select,
+        )
+        folds = base_wf['folds']
+    else:
+        folds = fixed_folds
+
+    oos_chunks, turnover_chunks, cost_chunks, replayed_folds = [], [], [], []
+    pos = train
+    for fold in folds:
+        te_lo, te_hi = pos, pos + test
+        if te_hi > len(panel):
+            break
+        wlo = max(0, te_lo - warmup)
+        df_full, _ = backtest_xs(
+            panel.iloc[wlo:te_hi],
+            mode='momentum',
+            market_neutral=False,
+            cost=cost,
+            **fold['best_params'],
+        )
+        test_index = panel.index[te_lo:te_hi]
+        oos = df_full['strat_net'].reindex(test_index).dropna()
+        turnover = df_full['turnover'].reindex(oos.index).fillna(0.0)
+        cost_paid = df_full['cost'].reindex(oos.index).fillna(0.0)
+        oos_chunks.append(oos)
+        turnover_chunks.append(turnover)
+        cost_chunks.append(cost_paid)
+        replayed = dict(fold)
+        replayed['oos_sharpe'] = metrics(oos)['sharpe']
+        replayed_folds.append(replayed)
+        pos += test
+    oos_returns = pd.concat(oos_chunks).sort_index() if oos_chunks else pd.Series(dtype=float)
+    turnover = pd.concat(turnover_chunks).sort_index() if turnover_chunks else pd.Series(dtype=float)
+    cost_paid = pd.concat(cost_chunks).sort_index() if cost_chunks else pd.Series(dtype=float)
+    return {
+        'oos_returns': oos_returns,
+        'oos_metrics': metrics(oos_returns),
+        'turnover': turnover,
+        'cost_paid': cost_paid,
+        'folds': replayed_folds,
+    }
+
+
+def active_ir_increase_warnings(rows: list[dict], tol: float = 1e-12) -> list[str]:
+    """Return warnings for Active IR bumps; IR is not a monotonic cost-drag metric."""
+    warnings = []
+    prev_row = None
+    for row in rows:
+        ir = row.get('active_ir')
+        if ir is None or pd.isna(ir) or not np.isfinite(ir):
+            prev_row = row
+            continue
+        if prev_row is not None:
+            prev_ir = prev_row.get('active_ir')
+            if (
+                prev_ir is not None
+                and not pd.isna(prev_ir)
+                and np.isfinite(prev_ir)
+                and ir > prev_ir + tol
+            ):
+                warnings.append(
+                    'Active IR increased as transaction cost rose: '
+                    f"{prev_row['cost_bps']:.2f} bps -> {row['cost_bps']:.2f} bps "
+                    f"({prev_ir:.12g} -> {ir:.12g})."
+                )
+        prev_row = row
+    return warnings
+
+
+def assert_cost_paid_non_decreasing(rows: list[dict], tol: float = 1e-12) -> None:
+    """Costs paid must rise monotonically with the swept bps on the fixed book."""
+    prev = None
+    for row in rows:
+        total_cost = row.get('strategy_cost_mean')
+        if total_cost is None or pd.isna(total_cost) or not np.isfinite(total_cost):
+            prev = row
+            continue
+        if prev is not None:
+            prev_cost = prev.get('strategy_cost_mean')
+            if (
+                prev_cost is not None
+                and not pd.isna(prev_cost)
+                and np.isfinite(prev_cost)
+                and total_cost + tol < prev_cost
+            ):
+                raise AssertionError(
+                    'Strategy cost paid decreased as transaction cost rose: '
+                    f"{prev['cost_bps']:.2f} bps -> {row['cost_bps']:.2f} bps "
+                    f"({prev_cost:.12g} -> {total_cost:.12g})."
+                )
+        prev = row
+
+
+def transaction_cost_sensitivity(
+    panel: pd.DataFrame,
+    param_grid: dict,
+    cost_bps_levels: list[float] | None = None,
+    selection_cost: float | None = None,
+    **wf_kwargs,
+) -> dict:
+    """Sweep costs on one fixed walk-forward book and benchmark cost model."""
+    levels = sorted({float(level) for level in (COST_SWEEP_BPS if cost_bps_levels is None else cost_bps_levels)})
+    if not levels:
+        return {'rows': [], 'break_even_bps': None, 'active_ir_warnings': []}
+    selection_cost = cost_from_bps(levels[0]) if selection_cost is None else selection_cost
+    selection_wf = walk_forward_long_only_with_turnover(
+        panel,
+        param_grid,
+        cost=selection_cost,
+        **wf_kwargs,
+    )
+    rows = []
+    for bps in levels:
+        cost = cost_from_bps(bps)
+        if abs(cost - selection_cost) <= 1e-15:
+            wf = selection_wf
+        else:
+            wf = walk_forward_long_only_with_turnover(
+                panel,
+                param_grid,
+                cost=cost,
+                fixed_folds=selection_wf['folds'],
+                **wf_kwargs,
+            )
+        benchmark = buy_hold_equal_weight_benchmark(panel, wf['oos_returns'].index, cost=cost)
+        active = active_oos_returns(wf['oos_returns'], benchmark['ret'])
+        active_ir = information_ratio(active)
+        verdict = validation_verdict(wf['oos_metrics']['sharpe'], active_ir, len(wf['folds']))
+        strategy_events = int((wf['turnover'] > 1e-9).sum())
+        strategy_turnover_mean = float(wf['turnover'].mean()) if len(wf['turnover']) else 0.0
+        benchmark_turnover_mean = float(benchmark['turnover'].mean()) if len(benchmark) else 0.0
+        strategy_cost_mean = float(wf['cost_paid'].mean()) if len(wf['cost_paid']) else 0.0
+        benchmark_cost_mean = float(benchmark['cost'].mean()) if len(benchmark) else 0.0
+        rows.append({
+            'cost_bps': float(bps),
+            'cost': cost,
+            'sharpe': wf['oos_metrics']['sharpe'],
+            'active_ir': active_ir,
+            'active_mean_return': float(active.mean()) if len(active) else 0.0,
+            'verdict': verdict,
+            'strategy_turnover_mean': strategy_turnover_mean,
+            'benchmark_turnover_mean': benchmark_turnover_mean,
+            'strategy_cost_mean': strategy_cost_mean,
+            'benchmark_cost_mean': benchmark_cost_mean,
+            'active_cost_drag_mean': strategy_cost_mean - benchmark_cost_mean,
+            'strategy_turnover_per_rebal': strategy_turnover_mean,
+            'benchmark_turnover_per_rebal': benchmark_turnover_mean,
+            'strategy_turnover_events': strategy_events,
+            'wf': wf,
+            'benchmark_returns': benchmark['ret'],
+        })
+    assert_cost_paid_non_decreasing(rows)
+    ir_warnings = active_ir_increase_warnings(rows)
+
+    breakeven = break_even_cost_bps(
+        [row['cost_bps'] for row in rows],
+        [row['active_ir'] for row in rows],
+    )
+    return {
+        'rows': rows,
+        'break_even_bps': breakeven,
+        'active_ir_warnings': ir_warnings,
+        'selection_cost_bps': float(selection_cost) * 10_000.0,
+    }
+
+
+def print_transaction_cost_sensitivity(
+    summary: dict,
+    label: str = 'custom',
+    headline_cost_bps: float | None = None,
+) -> None:
+    """Print transaction-cost sensitivity table."""
+    rows = summary.get('rows', [])
+    print(f'\n=== Transaction-cost sensitivity (long-only book, {label}) ===')
+    if rows:
+        print(
+            f"Strategy turnover(mean): {rows[0]['strategy_turnover_mean']:.2f}   "
+            f"Benchmark turnover(mean): {rows[0]['benchmark_turnover_mean']:.2f}"
+        )
+        selection_cost_bps = summary.get('selection_cost_bps')
+        if selection_cost_bps is not None:
+            print(f'Sweep fold-selection schedule: fixed at {selection_cost_bps:.0f} bps.')
+    print(f"{'Cost(bps RT)':<13}{'StratOOS Sharpe':>17}{'Active IR':>12}   Verdict")
+    for row in rows:
+        print(
+            f"{row['cost_bps']:<13.0f}{row['sharpe']:>17.2f}"
+            f"{row['active_ir']:>12.2f}   {row['verdict']}"
+        )
+    if summary.get('active_ir_warnings'):
+        print(
+            'Active IR shape note: cost paid is monotonic, but Active IR can rise '
+            'when the active-return volatility denominator falls; inspect the '
+            'cost rows as diagnostics, not as an optimizer.'
+        )
+    if not rows:
+        print('Break-even cost: unavailable - no estimable rows.')
+    elif rows[0]['active_ir'] <= 0.0:
+        print('Break-even cost: already <=0 gross - no positive-cost break-even.')
+    elif summary.get('break_even_bps') is None:
+        print('Break-even cost: no crossing in swept range.')
+    else:
+        print(f"Break-even cost (Active IR crosses 0): ~{summary['break_even_bps']:.1f} bps")
+    if rows:
+        headline = (
+            min(rows, key=lambda row: abs(row['cost_bps'] - headline_cost_bps))
+            if headline_cost_bps is not None
+            else rows[0]
+        )
+        print(
+            'Cost takeaway: this book usually turns over far more than the buy-and-hold '
+            'benchmark, so a low gross active IR is fragile; read the '
+            f"{headline['cost_bps']:.0f} bps row as the realistic-cost verdict "
+            f"({headline['verdict']})."
+        )
 
 
 def print_weighting_validation_report(summary: dict) -> None:

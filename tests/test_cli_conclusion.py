@@ -54,7 +54,10 @@ class TestCliConclusion(unittest.TestCase):
             'oos_max_dd': -0.182,
             'benchmark_oos_sharpe': 0.72,
             'active_oos_sharpe': 0.51,
+            'information_ratio': 0.44,
             'validation_verdict': 'EDGE',
+            'headline_cost_bps': 10.0,
+            'break_even_cost_bps': 32.5,
         }
         sizing_stats = {
             'max_rc_ticker': 'TER',
@@ -75,7 +78,8 @@ class TestCliConclusion(unittest.TestCase):
             sizing_stats,
         )
 
-        self.assertTrue(text.startswith('Validation verdict EDGE: strategy OOS Sharpe 1.23'))
+        self.assertTrue(text.startswith('Validation verdict EDGE at 10.00 bps round-trip cost'))
+        self.assertIn('break-even cost: ~32.50 bps', text)
         self.assertIn('TER +12.0%, MU +8.0%, AMAT +5.0%', text)
         self.assertIn(
             'MU flagged - verify filing before sizing',
@@ -119,7 +123,11 @@ class TestCliConclusion(unittest.TestCase):
             'oos_max_dd': -0.284,
             'benchmark_oos_sharpe': 0.18,
             'active_oos_sharpe': -0.53,
+            'information_ratio': -0.62,
             'validation_verdict': 'FAILS',
+            'headline_cost_bps': 10.0,
+            'break_even_cost_bps': None,
+            'cost_sensitivity': {'rows': [{'cost_bps': 0.0, 'active_ir': -0.10}]},
         }
         sizing_stats = {
             'max_rc_ticker': 'SNDK',
@@ -148,8 +156,9 @@ class TestCliConclusion(unittest.TestCase):
         )
         lower = text.lower()
 
-        self.assertTrue(text.startswith('Validation verdict FAILS: the ranking has no validated benchmark-relative edge'))
+        self.assertTrue(text.startswith('Validation verdict FAILS at 10.00 bps round-trip cost'))
         self.assertIn('strategy OOS Sharpe -0.35 vs benchmark 0.18', text)
+        self.assertIn('break-even cost: already <=0 gross', text)
         self.assertIn('max DD -28.4%', text)
         self.assertIn('Names to research: TER, MU, AMAT, SNDK, INTC, ASX.', text)
         self.assertIn('SNDK is a disproportionate risk contributor (25.7% vs equal-dollar 16.7%)', text)

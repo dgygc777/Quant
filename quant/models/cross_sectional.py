@@ -13,6 +13,7 @@ from quant.universes import DEFAULT_UNIVERSE, DEFAULT_PRESET, universe_selection
 # Re-export for backward compatibility.
 DEFAULT_TOP_FRAC = 0.25
 DEFAULT_RISK_LOOKBACK = 252
+DEFAULT_XS_COST = 0.0005
 
 
 def _normal_weighting_name(weighting: str) -> str:
@@ -194,7 +195,7 @@ def build_weights(prices: pd.DataFrame, scores: pd.DataFrame, top_frac: float = 
 
 
 def portfolio_returns(weights: pd.DataFrame, rets: pd.DataFrame,
-                      cost: float = 0.0005) -> pd.DataFrame:
+                      cost: float | pd.Series = DEFAULT_XS_COST) -> pd.DataFrame:
     """Compute portfolio returns with no look-ahead and aligned transaction costs.
 
     Execution assumption
@@ -207,23 +208,33 @@ def portfolio_returns(weights: pd.DataFrame, rets: pd.DataFrame,
         gross_return[t]     = sum_i weights[t-1, i] * returns[t, i]
         net_return[t]       = gross_return[t] - turnover[t] * cost
 
+    ``cost`` may also be a per-ticker Series. In that case, each ticker's
+    absolute weight change is multiplied by its own cost before summing.
+
     Costs are charged on day t when the position from the prior weight change
     becomes active (turnover[t] paired with gross_return[t]).
     """
     port_gross = (weights.shift(1) * rets).sum(axis=1)
     turnover = weights.diff().abs().sum(axis=1).fillna(0.0)
-    port_net = port_gross - turnover * cost
+    if isinstance(cost, pd.Series):
+        cost_vec = cost.astype(float).reindex(weights.columns).fillna(DEFAULT_XS_COST)
+        cost_paid = weights.diff().abs().mul(cost_vec, axis=1).sum(axis=1).fillna(0.0)
+    else:
+        cost_paid = turnover * float(cost)
+    port_net = port_gross - cost_paid
     bench = rets.mean(axis=1)
     return pd.DataFrame({
         'strat_net': port_net,
         'ret': bench,
         'turnover': turnover,
+        'cost': cost_paid,
         'gross': port_gross,
     }).dropna()
 
 
 def backtest_xs(prices: pd.DataFrame, mode: str = 'momentum', top_frac: float = 0.33,
-                rebalance: int = 5, cost: float = 0.0005, market_neutral: bool = True,
+                rebalance: int = 5, cost: float | pd.Series = DEFAULT_XS_COST,
+                market_neutral: bool = True,
                 weighting: str = 'equal',
                 risk_lookback: int = DEFAULT_RISK_LOOKBACK,
                 risk_shrink: float = 0.2,

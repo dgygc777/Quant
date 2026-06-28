@@ -70,7 +70,14 @@ from quant.momentum_presets import (
 )
 
 DEFAULT_COST = 0.0005
+DEFAULT_COST_BPS = 10.0
 MIN_RISK_REVIEW_NAMES = 6
+
+
+def _cost_from_bps(cost_bps: float | None) -> float:
+    if cost_bps is None:
+        return DEFAULT_COST
+    return float(cost_bps) / 10_000.0
 
 
 def resolve_portfolio_universe(args) -> tuple[str, list[str]]:
@@ -94,6 +101,8 @@ def add_portfolio_params(p: argparse.ArgumentParser) -> None:
                    choices=['momentum', 'reversal', 'all', 'combo'],
                    help='Cross-sectional signal (default: momentum)')
     p.add_argument('--years', type=int, default=5)
+    p.add_argument('--cost-bps', type=float, default=DEFAULT_COST_BPS,
+                   help='Round-trip transaction cost in bps for portfolio comparison/validation (default 10)')
     p.add_argument('--top-frac', type=float, default=DEFAULT_TOP_FRAC,
                    help=f'Fraction long / short per leg (default {DEFAULT_TOP_FRAC})')
     p.add_argument('--rebalance', type=int, default=5,
@@ -408,14 +417,20 @@ def _print_wf_validation(
     train: int = 504,
     test: int = 63,
     coverage: pd.Series | None = None,
+    momentum_preset: str = 'custom',
+    headline_cost: float = DEFAULT_COST,
+    headline_cost_bps: float | None = None,
 ) -> dict | None:
     from validate_cross_sectional import (
+        COST_SWEEP_BPS,
         GRID,
         MIN_VALIDATION_NAMES,
         WARMUP,
         compare_weighting_validation,
         print_weighting_validation_report,
+        print_transaction_cost_sensitivity,
         report_panel_validation,
+        transaction_cost_sensitivity,
     )
     print('\n=== Walk-forward validation (same universe / XS rules) ===')
     print('Full fold detail: python3 validate_cross_sectional.py --universe <preset>')
@@ -438,17 +453,39 @@ def _print_wf_validation(
         panel,
         GRID,
         book='long_only',
+        cost=headline_cost,
         train=train,
         test=test,
         warmup=WARMUP,
     )
     oos = wf['oos_metrics']
+    headline_sweep_bps = (
+        float(headline_cost_bps)
+        if headline_cost_bps is not None
+        else float(headline_cost) * 10_000.0
+    )
+    sweep_levels = sorted({float(level) for level in COST_SWEEP_BPS} | {headline_sweep_bps})
+    cost_sensitivity = transaction_cost_sensitivity(
+        panel,
+        GRID,
+        cost_bps_levels=sweep_levels,
+        selection_cost=headline_cost,
+        train=train,
+        test=test,
+        warmup=WARMUP,
+    )
+    print_transaction_cost_sensitivity(
+        cost_sensitivity,
+        label=momentum_preset,
+        headline_cost_bps=headline_cost_bps,
+    )
     sizing_validation = compare_weighting_validation(
         panel,
         GRID,
         train=train,
         test=test,
         warmup=WARMUP,
+        cost=headline_cost,
     )
     print_weighting_validation_report(sizing_validation)
     equal_row = sizing_validation.get('rows', {}).get('equal', {})
@@ -459,6 +496,21 @@ def _print_wf_validation(
         print(
             'Self-check: WARNING - equal weighting OOS Sharpe diverges from '
             f"main long-only OOS Sharpe ({equal_sharpe} vs {oos['sharpe']:.6f})."
+        )
+    sweep_row = next(
+        (
+            row for row in cost_sensitivity.get('rows', [])
+            if abs(row['cost_bps'] - headline_sweep_bps) <= 1e-9
+        ),
+        None,
+    )
+    if sweep_row and abs(sweep_row['sharpe'] - oos['sharpe']) <= 1e-6:
+        print('Self-check: OK - cost sweep headline row matches main long-only OOS Sharpe.')
+    else:
+        sweep_sharpe = sweep_row.get('sharpe') if sweep_row else None
+        print(
+            'Self-check: WARNING - cost sweep headline row diverges from '
+            f"main long-only OOS Sharpe ({sweep_sharpe} vs {oos['sharpe']:.6f})."
         )
     return {
         'folds': len(wf['folds']),
@@ -474,6 +526,9 @@ def _print_wf_validation(
         'sizing_validation': sizing_validation,
         'winning_weighting': sizing_validation.get('best_weighting'),
         'risk_parity_beats_equal': sizing_validation.get('risk_parity_beats_equal'),
+        'cost_sensitivity': cost_sensitivity,
+        'break_even_cost_bps': cost_sensitivity.get('break_even_bps'),
+        'headline_cost_bps': headline_cost_bps,
     }
 
 
@@ -701,31 +756,45 @@ def _buy_strategy_conclusion(
     active_ir = validation_stats.get('information_ratio') if validation_stats else None
     winning_weighting = validation_stats.get('winning_weighting') if validation_stats else None
     risk_parity_beats_equal = validation_stats.get('risk_parity_beats_equal') if validation_stats else None
+    headline_cost_bps = validation_stats.get('headline_cost_bps') if validation_stats else None
+    break_even_cost_bps = validation_stats.get('break_even_cost_bps') if validation_stats else None
+    cost_rows = validation_stats.get('cost_sensitivity', {}).get('rows', []) if validation_stats else []
+    cost_context = (
+        f'at {_fmt_float(headline_cost_bps)} bps round-trip cost'
+        if headline_cost_bps is not None
+        else 'at the configured transaction cost'
+    )
+    if cost_rows and float(cost_rows[0].get('active_ir', 0.0)) <= 0.0:
+        break_even_desc = 'break-even cost: already <=0 gross'
+    elif break_even_cost_bps is None:
+        break_even_desc = 'break-even cost: no crossing in swept range'
+    else:
+        break_even_desc = f'break-even cost: ~{_fmt_float(break_even_cost_bps)} bps'
     verdict = validation_stats.get('validation_verdict') if validation_stats else 'FAILS'
     validation_edge = verdict == 'EDGE'
     if validation_edge:
         validation_desc = (
-            f"Validation verdict EDGE: strategy OOS Sharpe {_fmt_float(oos_sharpe)} vs "
+            f"Validation verdict EDGE {cost_context}: strategy OOS Sharpe {_fmt_float(oos_sharpe)} vs "
             f"equal-weight benchmark {_fmt_float(benchmark_oos_sharpe)} "
             f"(Sharpe spread {_fmt_float(active_oos_sharpe)}, active-return IR {_fmt_float(active_ir)}), "
             f"ann return {_fmt_pct(oos_ann_return)}, max DD {_fmt_pct(oos_max_dd)} "
-            f"over {folds} folds."
+            f"over {folds} folds; {break_even_desc}."
         )
     elif verdict == 'MATCHES BENCHMARK — captures sector beta, not alpha':
         validation_desc = (
-            f"Validation verdict {verdict}: strategy OOS Sharpe {_fmt_float(oos_sharpe)} vs "
+            f"Validation verdict {verdict} {cost_context}: strategy OOS Sharpe {_fmt_float(oos_sharpe)} vs "
             f"benchmark {_fmt_float(benchmark_oos_sharpe)} "
             f"(Sharpe spread {_fmt_float(active_oos_sharpe)}, active-return IR {_fmt_float(active_ir)}), "
             f"max DD {_fmt_pct(oos_max_dd)}, "
-            f"folds {folds}; this is a research candidate that does not beat the basket."
+            f"folds {folds}; {break_even_desc}; this is a research candidate that does not beat the basket."
         )
     else:
         validation_desc = (
-            f"Validation verdict FAILS: the ranking has no validated benchmark-relative edge "
+            f"Validation verdict FAILS {cost_context}: the ranking has no validated benchmark-relative edge "
             f"(strategy OOS Sharpe {_fmt_float(oos_sharpe)} vs benchmark "
             f"{_fmt_float(benchmark_oos_sharpe)}, Sharpe spread {_fmt_float(active_oos_sharpe)}, "
             f"active-return IR {_fmt_float(active_ir)}, "
-            f"max DD {_fmt_pct(oos_max_dd)}, folds {folds}), so the momentum list is a "
+            f"max DD {_fmt_pct(oos_max_dd)}, folds {folds}; {break_even_desc}), so the momentum list is a "
             f"research/watchlist candidate screen only."
         )
 
@@ -906,13 +975,23 @@ def cmd_portfolio_compare(args) -> None:
     xs_params = panel_params_from_args(args)
     xs_params['mode'] = 'momentum'
     validate_momentum_params(xs_params['lookback'], xs_params['skip'], n_days=len(panel))
+    strategy_cost = _cost_from_bps(getattr(args, 'cost_bps', None))
     combined = combined_params_from_args(args)
-    rows = run_strategy_comparison(panel, xs_params, combined, DEFAULT_COST)
+    rows = run_strategy_comparison(panel, xs_params, combined, strategy_cost)
     print_strategy_comparison(rows)
-    print('\nBenchmark note: equal-weight is the universe basket; cash/zero is shown for L/S context.')
+    print(
+        f'\nBenchmark note: equal-weight is the universe basket; cash/zero is shown for L/S context. '
+        f'Headline strategy cost: {getattr(args, "cost_bps", DEFAULT_COST * 10_000):.1f} bps round-trip.'
+    )
     validation_stats = None
     if getattr(args, 'validate', False):
-        validation_stats = _print_wf_validation(panel, coverage=coverage)
+        validation_stats = _print_wf_validation(
+            panel,
+            coverage=coverage,
+            momentum_preset=xs_params['momentum_preset'],
+            headline_cost=strategy_cost,
+            headline_cost_bps=getattr(args, 'cost_bps', DEFAULT_COST * 10_000),
+        )
     weights = None
     scores = None
     tenk_df = None
