@@ -1,0 +1,420 @@
+{
+  "TSM:2026-04-16": {
+    "change_score": -0.35,
+    "summary": "Risk factors significantly expanded with new and more detailed trade policy uncertainties (Supreme Court ruling, Section 232 tariffs, Taiwan trade agreement), strengthened export control risks, updated VEU/licensing details for China fab, added IP infringement risk, and enhanced discussion of AI market dynamics and geopolitical instability effects.",
+    "prior_filing_date": "2025-04-17",
+    "current_filing_date": "2026-04-16",
+    "ok": true
+  },
+  "ASX:2026-04-01": {
+    "source": "annual",
+    "comparison_type": "year_over_year",
+    "section_used": "risk_factors",
+    "match_method": "annual_pair",
+    "change_score": -0.15,
+    "summary": "Risk factors remain substantially similar, but governance structure was consolidated (CSC renamed to CSISC with expanded scope), some sustainability language was streamlined, and the Risk Management section was shortened by removing details about the Chief Administration Officer's specific oversight role.",
+    "confidence": 0.72,
+    "non_comparable_reason": null,
+    "prior_filing_date": "2025-03-27",
+    "current_filing_date": "2026-04-01",
+    "form": "20-F",
+    "prior_form": "20-F",
+    "model": "claude-haiku-4-5-20251001",
+    "scored_at": "2026-06-28T15:56:08.547742+00:00",
+    "extraction_quality": 918.36056,
+    "section_preview": "Item 3. Key Information\u2014Risk Factors\u2014 Risks Relating to Our Business\u2014Any            environmental claims or failure to comply with any present or future environmental   laws and regulations, as well a",
+    "ok": true
+  },
+  "AMAT:2025-12-12": {
+    "source": "annual",
+    "comparison_type": "year_over_year",
+    "section_used": "risk_factors",
+    "match_method": "annual_pair",
+    "change_score": -0.25,
+    "summary": "Risk factors have been moderately strengthened with new emphasis on tariff uncertainty, rare earth mineral export controls, and AI demand forecasting challenges, partially offset by some consolidation of supply chain language.",
+    "confidence": 0.72,
+    "non_comparable_reason": null,
+    "prior_filing_date": "2024-12-13",
+    "current_filing_date": "2025-12-12",
+    "form": "10-K",
+    "prior_form": "10-K",
+    "model": "claude-haiku-4-5-20251001",
+    "scored_at": "2026-06-28T16:01:12.346574+00:00",
+    "extraction_quality": 1058.99604,
+    "section_preview": "Risk Factors                                                                                                                                                            The following risk factors could",
+    "ok": true
+  },
+  "INTC:2026-01-23": {
+    "source": "annual",
+    "comparison_type": "year_over_year",
+    "section_used": "risk_factors",
+    "match_method": "annual_pair",
+    "change_score": -0.72,
+    "summary": "Risk profile significantly strengthened with new critical risks around foundry strategy uncertainty, dependency on TSMC, potential asset impairments, and explicit acknowledgment of unsuccessful AI accelerator efforts and market share losses across multiple segments.",
+    "confidence": 0.92,
+    "non_comparable_reason": null,
+    "prior_filing_date": "2025-01-31",
+    "current_filing_date": "2026-01-23",
+    "form": "10-K",
+    "prior_form": "10-K",
+    "model": "claude-haiku-4-5-20251001",
+    "scored_at": "2026-06-28T16:02:50.264908+00:00",
+    "extraction_quality": 835.09528,
+    "section_preview": "Risk Factors                    The following summarizes what we believe to be the material factors that make an investment in our securities speculative or risky. When any one or more of the followin",
+    "ok": true
+  },
+  "ARM:2026-05-26": {
+    "change_score": -0.65,
+    "summary": "Risk factors significantly strengthened with new production silicon manufacturing risks, expanded competitive threats from AI tools and governmental support, talent retention concerns, and litigation disclosures added.",
+    "confidence": 0.92,
+    "non_comparable_reason": null,
+    "prior_filing_date": "2025-05-28",
+    "current_filing_date": "2026-05-26",
+    "form": "20-F",
+    "prior_form": "20-F",
+    "model": "claude-haiku-4-5-20251001",
+    "scored_at": "2026-06-27T19:45:40.035964+00:00",
+    "extraction_quality": 1172.0432799999999,
+    "section_preview": "Risk Factors                                                                                                                                                                                            ",
+    "ok": true
+  },
+  "AMZN:2026-02-06": {
+    "change_score": -0.25,
+    "summary": "Current year adds heightened emphasis on tariff and trade policy risks, explicitly references AI/automation adoption risks, and includes disclaimer language about forward-looking statements, while maintaining otherwise similar core risk disclosures.",
+    "prior_filing_date": "2025-02-07",
+    "current_filing_date": "2026-02-06",
+    "ok": true
+  },
+  "META:2026-01-29": {
+    "change_score": -0.25,
+    "summary": "Violating accounts error margin increased from <3% to <5% with methodology updates, and Risk Factors section emphasizes new AI superintelligence investments as part of company vision, introducing longer-term uncertainty around emergent technology development.",
+    "prior_filing_date": "2025-01-30",
+    "current_filing_date": "2026-01-29",
+    "ok": true
+  },
+  "NFLX:2026-01-23": {
+    "change_score": -0.25,
+    "summary": "Current year adds several new risk factors including generative AI competitive threats, open content platform competition, advertisement-related member dissatisfaction, ESG concerns, WBD transaction risks, payment processing complexity, and expanded regulatory/compliance obligations, while removing seasonality mentions and moderating some language.",
+    "prior_filing_date": "2025-01-27",
+    "current_filing_date": "2026-01-23",
+    "ok": true
+  },
+  "TXN:2026-02-06": {
+    "change_score": -0.65,
+    "summary": "Risk factors strengthened with new disclosures on China revenue (50% of products shipped into China), increased regulatory scrutiny of semiconductors, tariff-specific impacts, and explicit trade measure risks, while simplifying some prior hedging language on China competition.",
+    "prior_filing_date": "2025-02-14",
+    "current_filing_date": "2026-02-06",
+    "ok": true
+  },
+  "ISRG:2026-02-03": {
+    "change_score": -0.15,
+    "summary": "Risk factors show modest strengthening of risk language with refined litigation language, expanded data privacy/AI compliance risks with explicit liability consequences, reorganized topic ordering, and hedged language changes (e.g., 'may adversely' replacing 'could materially adversely'), offset by removal of pandemic and AI product integration risks and softened operational language.",
+    "prior_filing_date": "2025-01-31",
+    "current_filing_date": "2026-02-03",
+    "ok": true
+  },
+  "BKNG:2026-02-18": {
+    "change_score": null,
+    "summary": "non-comparable excerpts",
+    "prior_filing_date": "2025-02-20",
+    "current_filing_date": "2026-02-18",
+    "ok": true
+  },
+  "PANW:2025-08-29": {
+    "change_score": -0.25,
+    "summary": "Current year adds specific forward-looking statements about CyberArk acquisition, customer financing, tariff rates, and product manufacturing risks, while also introducing new product/service descriptions (Prisma AIRS, Prisma Access Browser, Cortex Cloud consolidation) that add complexity and contingency language around integration and execution.",
+    "prior_filing_date": "2024-09-06",
+    "current_filing_date": "2025-08-29",
+    "ok": true
+  },
+  "ADP:2025-08-06": {
+    "change_score": -0.25,
+    "summary": "Risk disclosure expanded with additional specific compliance obligations (Tax Credit Services, payroll/tax remittance liability, Canadian Payment Services Provider registration), enhanced AI-related risks (added 'transparency' and 'quantum computing' threats, generative AI tool usage by vendors), and updated data security language reflecting evolving threat landscape and new regulatory frameworks.",
+    "prior_filing_date": "2024-08-07",
+    "current_filing_date": "2025-08-06",
+    "ok": true
+  },
+  "KLAC:2025-08-08": {
+    "change_score": -0.25,
+    "summary": "Risk factors strengthened with additions of tariffs/trade restrictions risk, geopolitical escalation (Middle East), and ESG language change emphasizing stakeholder misalignment; business description expanded to highlight services revenue and advanced packaging growth, but forward-looking cautionary language slightly weakened.",
+    "prior_filing_date": "2024-08-05",
+    "current_filing_date": "2025-08-08",
+    "ok": true
+  },
+  "AEHR:2025-07-28": {
+    "change_score": -0.65,
+    "summary": "Current year shows materially increased risk exposure with added concerns about electric vehicle market demand, tariff-driven uncertainty, new Sonoma system market acceptance risks, AI implementation challenges, and an acquisition risk revision, partially offset by improved customer concentration metrics (77% vs 93% for top-5).",
+    "prior_filing_date": "2024-07-30",
+    "current_filing_date": "2025-07-28",
+    "ok": true
+  },
+  "ASML:2026-02-25": {
+    "change_score": -0.35,
+    "summary": "Current year shifts from broad ESG/human rights governance focus to more specific cybersecurity and information security risk management, with added regulatory complexity (NIS2, CRA) and explicit acknowledgment of zero material incidents in 2025, representing both narrower risk scope and somewhat reduced hedging language on specific security threats.",
+    "prior_filing_date": "2025-03-05",
+    "current_filing_date": "2026-02-25",
+    "ok": true
+  },
+  "LRCX:2025-08-11": {
+    "change_score": -0.25,
+    "summary": "Risk factors have been reordered with technology/competition risks elevated to top priority, and new cybersecurity risk section added; several existing risks strengthened with additional specificity (e.g., multi-year investment commitments, government spending reductions, expanded tariff language, climate-specific disasters).",
+    "confidence": 0.72,
+    "non_comparable_reason": null,
+    "prior_filing_date": "2024-08-29",
+    "current_filing_date": "2025-08-11",
+    "form": "10-K",
+    "prior_form": "10-K",
+    "model": "claude-haiku-4-5-20251001",
+    "scored_at": "2026-06-27T19:44:05.086189+00:00",
+    "extraction_quality": 882.55712,
+    "section_preview": "Item 1A.                                                                                                             \u2502 \u2502                                                                                ",
+    "ok": true
+  },
+  "ALAB:2026-02-20": {
+    "change_score": -0.35,
+    "summary": "Risk disclosure strengthened with increased customer concentration (one customer now 70%+ of revenue vs. prior 40% max), shift from net losses to profitability language, addition of economic conditions risk factor, and inclusion of new technology standards (UALink), partially offset by improved financial trajectory.",
+    "prior_filing_date": "2025-02-14",
+    "current_filing_date": "2026-02-20",
+    "ok": true
+  },
+  "GFS:2026-02-27": {
+    "change_score": -0.25,
+    "summary": "Risk profile strengthened with new anti-corruption compliance risks and debt covenant violations tied to export control breaches, partially offset by reduced interest rate risk language and IBM litigation resolution.",
+    "confidence": 0.75,
+    "non_comparable_reason": null,
+    "prior_filing_date": "2025-03-20",
+    "current_filing_date": "2026-02-27",
+    "form": "20-F",
+    "prior_form": "20-F",
+    "model": "claude-haiku-4-5-20251001",
+    "scored_at": "2026-06-27T19:45:58.506287+00:00",
+    "extraction_quality": 1342.9402,
+    "section_preview": "Item 3. Key Information \u2014D. Risk Factors\u2014Risk Factors\u2014Risks Related to Manufacturing, Operations and Expansion\u2014Certain of our debt agreements contain covenants that may constrain the operation of our ",
+    "ok": true
+  },
+  "FORM:2026-02-20": {
+    "change_score": -0.15,
+    "summary": "Risk factors remain largely similar, but current year adds specific operational risks around the new Farmers Branch, Texas manufacturing facility expansion and removes mention of ongoing cyclical downturn, while also softening trade restriction language from 'implemented since fiscal 2022 and those proposed' to just 'U.S.-China trade restrictions.'",
+    "prior_filing_date": "2025-02-21",
+    "current_filing_date": "2026-02-20",
+    "ok": true
+  },
+  "COHR:2025-08-15": {
+    "change_score": -0.35,
+    "summary": "Risk factors were reorganized and consolidated with some risks removed or de-emphasized (e.g., health crisis, inflation, data privacy specifics, climate regulations, Denso/Mitsubishi investments), but new risks added (AI uncertainties, tariffs, legal/regulatory investigations, divestment strategy) and existing risks strengthened (tariffs now explicitly mentioned, regulatory compliance emphasized), resulting in a net modest increase in risk disclosure intensity.",
+    "confidence": 0.72,
+    "non_comparable_reason": null,
+    "prior_filing_date": "2024-08-16",
+    "current_filing_date": "2025-08-15",
+    "form": "10-K",
+    "prior_form": "10-K",
+    "model": "claude-haiku-4-5-20251001",
+    "scored_at": "2026-06-27T19:47:55.106053+00:00",
+    "extraction_quality": 891.96368,
+    "section_preview": "Item 1A. \u201cRisk Factors\u201d herein in their entirety for additional information regarding these risks and uncertainties.  Risks Related to Our Business, Operations and Industry  \u2022 Our competitive position",
+    "ok": true
+  },
+  "MU:2025-10-03": {
+    "change_score": -0.25,
+    "summary": "Risk factors have been strengthened with more detailed language on geopolitical risks (China CAC decision, Taiwan exposure), expanded gross margin pressures (added regulatory/tariff impacts, regional cost differences, compressed timelines), and enhanced competitive threats (Chinese government support for competitors, CXMT/YMTC emphasis), while some language became more cautious (e.g., 'ongoing adverse conditions' vs 'downturn').",
+    "confidence": 0.75,
+    "non_comparable_reason": null,
+    "prior_filing_date": "2024-10-04",
+    "current_filing_date": "2025-10-03",
+    "form": "10-K",
+    "prior_form": "10-K",
+    "model": "claude-haiku-4-5-20251001",
+    "scored_at": "2026-06-27T19:57:23.660631+00:00",
+    "extraction_quality": 642.6664,
+    "section_preview": "ITEM 1A. RISK FACTORS                                                                                                \u2502 \u2502                                                                                ",
+    "ok": true
+  },
+  "NVDA:2026-02-25": {
+    "change_score": -0.25,
+    "summary": "Risk factors have been expanded and intensified with new risks added (Groq IP license arrangement, counterparty risks, energy/capital constraints for customer deployments, U.S. manufacturing scaling risks, non-binding government purchase announcements), while language emphasizing severity and uncertainty has been strengthened throughout, indicating materially increased risk posture.",
+    "prior_filing_date": "2025-02-26",
+    "current_filing_date": "2026-02-25",
+    "ok": true
+  },
+  "TER:2026-02-19": {
+    "source": "annual",
+    "comparison_type": "year_over_year",
+    "section_used": "risk_factors",
+    "match_method": "annual_pair",
+    "change_score": -0.35,
+    "summary": "Risk disclosures strengthened with more specific customer concentration metrics, expanded competitive landscape concerns, additional international compliance risks, and enhanced acquisition/impairment risk details.",
+    "confidence": 0.85,
+    "non_comparable_reason": null,
+    "prior_filing_date": "2025-02-20",
+    "current_filing_date": "2026-02-19",
+    "form": "10-K",
+    "prior_form": "10-K",
+    "model": "claude-haiku-4-5-20251001",
+    "scored_at": "2026-06-28T16:00:02.309781+00:00",
+    "extraction_quality": 944.24632,
+    "section_preview": "Risk Factors                                                                                                                                                      Descriptions of risks associated with ",
+    "ok": true
+  },
+  "AMAT:2026-05-21": {
+    "source": "quarterly",
+    "comparison_type": "year_over_year",
+    "section_used": "risk_factors",
+    "match_method": "fiscal_period",
+    "change_score": -0.35,
+    "summary": "Risk posture materially strengthened with resolved BIS settlement ($253M penalty), new Chinese rare earth export controls, sector-based tariffs, and restructured supply chain risk disclosures emphasizing geopolitical and regulatory pressures.",
+    "confidence": 0.82,
+    "non_comparable_reason": null,
+    "prior_filing_date": "2025-05-22",
+    "current_filing_date": "2026-05-21",
+    "form": "10-Q",
+    "prior_form": "10-Q",
+    "current_period": "2026-04-26",
+    "prior_period": "2025-04-27",
+    "model": "claude-haiku-4-5-20251001",
+    "scored_at": "2026-06-28T10:49:00.670037+00:00",
+    "extraction_quality": 1251.36556,
+    "section_preview": "Item 1A:                                                                                                                                                                                                ",
+    "candidate_lengths": {
+      "prior": {
+        "risk_factors": 78874,
+        "mda": 52066
+      },
+      "current": {
+        "risk_factors": 66703,
+        "mda": 52013
+      }
+    },
+    "ok": true
+  },
+  "MU:2026-06-25": {
+    "source": "quarterly",
+    "comparison_type": "year_over_year",
+    "section_used": "risk_factors",
+    "match_method": "fiscal_period",
+    "change_score": -0.35,
+    "summary": "Risk posture materially strengthened with expanded operational complexity, supply chain execution risks, AI demand volatility concerns, and geopolitical/regulatory pressures; partially offset by recent ASP recovery.",
+    "confidence": 0.78,
+    "non_comparable_reason": null,
+    "prior_filing_date": "2025-06-26",
+    "current_filing_date": "2026-06-25",
+    "form": "10-Q",
+    "prior_form": "10-Q",
+    "current_period": "2026-05-28",
+    "prior_period": "2025-05-29",
+    "model": "claude-haiku-4-5-20251001",
+    "scored_at": "2026-06-28T10:36:56.599197+00:00",
+    "extraction_quality": 665.1204,
+    "section_preview": "\u2502                                                                                  \u2502 \u2502  ITEM 1A. RISK FACTORS                                                           \u2502 \u2502                             ",
+    "candidate_lengths": {
+      "prior": {
+        "risk_factors": 107179,
+        "mda": 47605
+      },
+      "current": {
+        "risk_factors": 121837,
+        "mda": 48116
+      }
+    },
+    "ok": true
+  },
+  "TER:2026-05-01": {
+    "source": "quarterly",
+    "comparison_type": "year_over_year",
+    "section_used": "mda_both",
+    "match_method": "fiscal_period",
+    "change_score": 0.72,
+    "summary": "Risk posture significantly eased with record AI-driven Semiconductor Test demand, strong sequential Robotics growth, improved operating leverage, and reduced restructuring pressures, though offset by increased debt and tariff compliance costs.",
+    "confidence": 0.85,
+    "non_comparable_reason": null,
+    "prior_filing_date": "2025-05-02",
+    "current_filing_date": "2026-05-01",
+    "form": "10-Q",
+    "prior_form": "10-Q",
+    "current_period": "2026-03-29",
+    "prior_period": "2025-03-30",
+    "model": "claude-haiku-4-5-20251001",
+    "scored_at": "2026-06-28T10:47:43.186227+00:00",
+    "extraction_quality": 1534.7982,
+    "section_preview": "Item 2: Management\u2019s Discussion and Analysis of Financial Condition and Results of   Operations                                                                                                         ",
+    "candidate_lengths": {
+      "prior": {
+        "risk_factors": 1148,
+        "mda": 36433
+      },
+      "current": {
+        "risk_factors": 1233,
+        "mda": 40313
+      }
+    },
+    "ok": true
+  },
+  "INTC:2026-04-24": {
+    "source": "quarterly",
+    "comparison_type": "year_over_year",
+    "section_used": "mda_both",
+    "match_method": "fiscal_period",
+    "change_score": -0.72,
+    "summary": "Material deterioration in risk posture: geopolitical conflict threatens Israeli operations, $3.9B goodwill impairment on Mobileye, supply constraints limiting demand fulfillment, $14.2B debt incurred for Apollo buyout, and strategic uncertainty around Intel 14A node development viability.",
+    "confidence": 0.92,
+    "non_comparable_reason": null,
+    "prior_filing_date": "2025-04-25",
+    "current_filing_date": "2026-04-24",
+    "form": "10-Q",
+    "prior_form": "10-Q",
+    "current_period": "2026-03-28",
+    "prior_period": "2025-03-29",
+    "model": "claude-haiku-4-5-20251001",
+    "scored_at": "2026-06-28T15:35:54.619595+00:00",
+    "extraction_quality": 1462.70652,
+    "section_preview": "Management's Discussion and Analysis                                            Overview  This report should be read in conjunction with our 2025 Form 10-K where we include additional information on o",
+    "candidate_lengths": {
+      "prior": {
+        "risk_factors": 5241,
+        "mda": 38944
+      },
+      "current": {
+        "risk_factors": 955,
+        "mda": 61505
+      }
+    },
+    "ok": true
+  },
+  "AMD:2026-02-04": {
+    "source": "annual",
+    "comparison_type": "year_over_year",
+    "section_used": "risk_factors",
+    "match_method": "annual_pair",
+    "change_score": -0.25,
+    "summary": "Risk factors have been moderately strengthened with removal of specific competitor risks (Intel/Nvidia dominance sections), addition of new risks around data center infrastructure constraints and customer financing challenges, and expanded discussion of product transition complexity and competitive partnerships.",
+    "confidence": 0.72,
+    "non_comparable_reason": null,
+    "prior_filing_date": "2025-02-05",
+    "current_filing_date": "2026-02-04",
+    "form": "10-K",
+    "prior_form": "10-K",
+    "model": "claude-haiku-4-5-20251001",
+    "scored_at": "2026-06-28T16:04:08.865038+00:00",
+    "extraction_quality": 1098.37488,
+    "section_preview": "ITEM 1A. RISK FACTORS                                                           \u2502 \u2502                                                                                  \u2502 \u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+    "ok": true
+  },
+  "MRVL:2026-03-11": {
+    "source": "annual",
+    "comparison_type": "year_over_year",
+    "section_used": "risk_factors",
+    "match_method": "annual_pair",
+    "change_score": -0.65,
+    "summary": "Risk profile significantly strengthened with new AI disruption risks, geopolitical concerns (Israel-Middle East conflict), higher customer concentration (82% vs 81%), and expanded concerns about AI-driven vertical integration and product obsolescence.",
+    "confidence": 0.92,
+    "non_comparable_reason": null,
+    "prior_filing_date": "2025-03-12",
+    "current_filing_date": "2026-03-11",
+    "form": "10-K",
+    "prior_form": "10-K",
+    "model": "claude-haiku-4-5-20251001",
+    "scored_at": "2026-06-28T16:22:55.443601+00:00",
+    "extraction_quality": 1098.1268,
+    "section_preview": "Item 1A.                                                                        \u2502 \u2502                                                                                  \u2502 \u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+    "ok": true
+  }
+}
