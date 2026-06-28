@@ -6,6 +6,8 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+from quant.data_quality import format_clipped_returns, winsorize_extreme_returns
+
 
 def fetch_daily_prices(ticker: str, lookback_days: int = 120) -> pd.Series:
     """Download adjusted daily close prices."""
@@ -50,6 +52,9 @@ def fetch_panel(tickers: list[str], years: int) -> pd.DataFrame:
     close.columns = [str(c).upper() for c in close.columns]
     if close.shape[1] < 2:
         raise ValueError('Cross-sectional backtest needs at least 2 tickers with data.')
+    close, clipped = winsorize_extreme_returns(close)
+    if not clipped.empty:
+        print('Clipped extreme daily returns (>35%): ' + format_clipped_returns(clipped))
     return close
 
 

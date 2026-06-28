@@ -29,10 +29,23 @@ import numpy as np
 import pandas as pd
 
 from quant.data import fetch_panel
+from quant.data_quality import (
+    MIN_COVERAGE,
+    filter_panel_by_coverage,
+    format_coverage as _format_coverage,
+)
 from quant.metrics import metrics
 from quant.models.cross_sectional import CrossSectionalModel, backtest_xs
 from quant.universes import DEFAULT_PRESET, get_universe
 from quant.validation import iter_param_grid, optimize_full, walk_forward
+
+BOOK_CHOICES = ('long_only', 'long_short')
+MIN_VALIDATION_NAMES = 4
+MIN_VALIDATION_FOLDS = 8
+ACTIVE_SHARPE_EDGE_MARGIN = 0.25
+VERDICT_EDGE = 'EDGE'
+VERDICT_MATCHES = 'MATCHES BENCHMARK — captures sector beta, not alpha'
+VERDICT_FAILS = 'FAILS'
 
 GRID = {
     'lookback': [63, 126, 252],
@@ -44,13 +57,75 @@ GRID = {
 WARMUP = max(GRID['lookback']) + 18
 
 
-def xs_strat(panel, **kw):
+def book_market_neutral(book: str) -> bool:
+    if book not in BOOK_CHOICES:
+        raise ValueError(f'unknown book: {book}')
+    return book == 'long_short'
+
+
+def book_description(book: str) -> str:
+    if book == 'long_only':
+        return 'LONG-ONLY top-k book (this is the gate for a long-only trader)'
+    return 'LONG/SHORT dollar-neutral book (diagnostic spread, not the default long-only gate)'
+
+
+def make_xs_strategy(book: str = 'long_only'):
     """backtest_xs returns (DataFrame, n_rebalances); strategy returns are strat_net."""
-    return backtest_xs(panel, mode='momentum', **kw)[0]['strat_net']
+    market_neutral = book_market_neutral(book)
+
+    def _strategy(panel, **kw):
+        return backtest_xs(
+            panel,
+            mode='momentum',
+            market_neutral=market_neutral,
+            **kw,
+        )[0]['strat_net']
+
+    return _strategy
 
 
-def _xs_model_params(grid_params: dict) -> dict:
-    return {'mode': 'momentum', **grid_params}
+def xs_strat(panel, **kw):
+    """Backward-compatible default: validate the long-only book."""
+    return make_xs_strategy('long_only')(panel, **kw)
+
+
+def _xs_model_params(grid_params: dict, book: str = 'long_only') -> dict:
+    return {
+        'mode': 'momentum',
+        'market_neutral': book_market_neutral(book),
+        **grid_params,
+    }
+
+
+def fold_count(n_rows: int, train: int, test: int) -> int:
+    if n_rows < train + test:
+        return 0
+    return (n_rows - train) // test
+
+
+def equal_weight_oos_returns(panel: pd.DataFrame, oos_index: pd.Index) -> pd.Series:
+    """Equal-weight basket returns over the same OOS dates as walk_forward."""
+    benchmark = panel.pct_change(fill_method=None).mean(axis=1)
+    return benchmark.reindex(oos_index).dropna()
+
+
+def validation_verdict(
+    strategy_oos_sharpe: float,
+    benchmark_oos_sharpe: float,
+    folds: int,
+    *,
+    min_folds: int = MIN_VALIDATION_FOLDS,
+    margin: float = ACTIVE_SHARPE_EDGE_MARGIN,
+) -> str:
+    """Classify whether OOS performance beats the same-universe benchmark."""
+    if folds < min_folds or pd.isna(strategy_oos_sharpe) or strategy_oos_sharpe <= 0:
+        return VERDICT_FAILS
+    active = strategy_oos_sharpe - benchmark_oos_sharpe
+    if active > margin:
+        return VERDICT_EDGE
+    if abs(active) <= margin:
+        return VERDICT_MATCHES
+    return VERDICT_FAILS
 
 
 def _format_leg(label: str, as_of: pd.Timestamp, weights: pd.Series,
@@ -78,8 +153,8 @@ def _format_leg(label: str, as_of: pd.Timestamp, weights: pd.Series,
 
 
 def _book_at(model: CrossSectionalModel, panel: pd.DataFrame,
-             params: dict) -> tuple[pd.Series, pd.Series, pd.Timestamp]:
-    p = _xs_model_params(params)
+             params: dict, book: str = 'long_only') -> tuple[pd.Series, pd.Series, pd.Timestamp]:
+    p = _xs_model_params(params, book)
     as_of = panel.index[-1]
     try:
         weights = model.current_weights(panel, **p)
@@ -92,9 +167,11 @@ def _book_at(model: CrossSectionalModel, panel: pd.DataFrame,
 
 def print_oos_fold_ranks(panel: pd.DataFrame, param_grid: dict,
                          train: int, test: int, warmup: int,
-                         select: str = 'sharpe') -> None:
+                         select: str = 'sharpe',
+                         book: str = 'long_only') -> None:
     """Print long/short legs at test start/end for each walk-forward fold."""
     model = CrossSectionalModel()
+    strategy_fn = make_xs_strategy(book)
     n = len(panel)
     pos = train
     fold_n = 0
@@ -110,14 +187,14 @@ def print_oos_fold_ranks(panel: pd.DataFrame, param_grid: dict,
 
         best_params, best_is, best_score = None, None, -np.inf
         for params in iter_param_grid(param_grid):
-            m = metrics(xs_strat(panel.iloc[tr_lo:tr_hi], **params))
+            m = metrics(strategy_fn(panel.iloc[tr_lo:tr_hi], **params))
             if m[select] > best_score:
                 best_score, best_params, best_is = m[select], params, m
 
-        w_start, s_start, d_start = _book_at(model, panel.iloc[:te_lo + 1], best_params)
-        w_end, s_end, d_end = _book_at(model, panel.iloc[:te_hi], best_params)
+        w_start, s_start, d_start = _book_at(model, panel.iloc[:te_lo + 1], best_params, book)
+        w_end, s_end, d_end = _book_at(model, panel.iloc[:te_hi], best_params, book)
 
-        oos_ret = xs_strat(panel.iloc[max(0, te_lo - warmup):te_hi], **best_params)
+        oos_ret = strategy_fn(panel.iloc[max(0, te_lo - warmup):te_hi], **best_params)
         oos_m = metrics(oos_ret.reindex(panel.index[te_lo:te_hi]).dropna())
 
         print(f'--- Fold {fold_n} ---')
@@ -132,11 +209,25 @@ def print_oos_fold_ranks(panel: pd.DataFrame, param_grid: dict,
 
 
 def report_panel_validation(name, panel, param_grid, show_fold_ranks: bool = False,
-                            **wf_kwargs) -> dict:
+                            book: str = 'long_only', **wf_kwargs) -> dict:
     """Panel walk-forward report — same three rows as quant.validation.report_validation."""
-    _, full_m = optimize_full(xs_strat, panel, param_grid)
-    wf = walk_forward(xs_strat, panel, param_grid, **wf_kwargs)
+    strategy_fn = make_xs_strategy(book)
+    print(f'\nValidating: {book_description(book)}')
+    print(
+        f'Validation data context: names={panel.shape[1]} rows={len(panel)} '
+        f'folds={fold_count(len(panel), wf_kwargs["train"], wf_kwargs["test"])}'
+    )
+    _, full_m = optimize_full(strategy_fn, panel, param_grid)
+    wf = walk_forward(strategy_fn, panel, param_grid, **wf_kwargs)
     oos = wf['oos_metrics']
+    benchmark_oos_returns = equal_weight_oos_returns(panel, wf['oos_returns'].index)
+    benchmark_oos = metrics(benchmark_oos_returns)
+    active_oos_sharpe = oos['sharpe'] - benchmark_oos['sharpe']
+    verdict = validation_verdict(oos['sharpe'], benchmark_oos['sharpe'], len(wf['folds']))
+    wf['benchmark_oos_returns'] = benchmark_oos_returns
+    wf['benchmark_oos_metrics'] = benchmark_oos
+    wf['active_oos_sharpe'] = active_oos_sharpe
+    wf['validation_verdict'] = verdict
     mean_is = np.mean([f['in_sample_sharpe'] for f in wf['folds']]) if wf['folds'] else 0.0
 
     print(f'\n=== {name} ===')
@@ -147,8 +238,12 @@ def report_panel_validation(name, panel, param_grid, show_fold_ranks: bool = Fal
           f"{'':>9}{'':>9}   <- optimistic")
     print(f"{'Walk-forward, OUT-OF-SAMPLE':34}{oos['sharpe']:>9.2f}"
           f"{oos['ann_return']:>9.1%}{oos['max_dd']:>9.1%}   <- the honest number")
+    print(f"{'Equal-weight benchmark OOS':34}{benchmark_oos['sharpe']:>9.2f}"
+          f"{benchmark_oos['ann_return']:>9.1%}{benchmark_oos['max_dd']:>9.1%}   <- same OOS folds")
     gap = full_m['sharpe'] - oos['sharpe']
     print(f'\nOverfitting tax (naive - OOS Sharpe): {gap:.2f}')
+    print(f'Active OOS Sharpe (strategy - benchmark): {active_oos_sharpe:+.2f}')
+    print(f'Validation verdict: {verdict} (edge margin {ACTIVE_SHARPE_EDGE_MARGIN:.2f})')
     print(f'Folds: {len(wf["folds"])}')
 
     if show_fold_ranks:
@@ -157,6 +252,7 @@ def report_panel_validation(name, panel, param_grid, show_fold_ranks: bool = Fal
             train=wf_kwargs['train'],
             test=wf_kwargs['test'],
             warmup=wf_kwargs.get('warmup', WARMUP),
+            book=book,
         )
 
     return wf
@@ -173,6 +269,18 @@ def main() -> None:
     parser.add_argument('--years', type=int, default=10, help='Years of history')
     parser.add_argument('--train', type=int, default=504, help='Train window (trading days)')
     parser.add_argument('--test', type=int, default=63, help='Test window (trading days)')
+    parser.add_argument(
+        '--book',
+        choices=BOOK_CHOICES,
+        default='long_only',
+        help='Book to validate: long_only or long_short (default: long_only)',
+    )
+    parser.add_argument(
+        '--min-coverage',
+        type=float,
+        default=MIN_COVERAGE,
+        help='Minimum non-NaN ticker coverage before validation (default: 0.60)',
+    )
     parser.add_argument(
         '--warmup', type=int, default=None,
         help=f'Warmup bars before test window (default: {WARMUP})',
@@ -198,11 +306,29 @@ def main() -> None:
         print(f'Fetch failed: {exc}', file=sys.stderr)
         sys.exit(1)
 
+    panel, coverage, dropped = filter_panel_by_coverage(panel, args.min_coverage)
+    if len(dropped):
+        print(f'Excluded (coverage < {args.min_coverage:.0%}): {_format_coverage(dropped)}')
+    else:
+        print(f'Excluded (coverage < {args.min_coverage:.0%}): none')
+    print(f'Survived coverage filter: {panel.shape[1]}/{len(tickers)} names')
+
     print(
         f'Walk-forward cross-sectional: universe={args.universe} '
-        f'n={len(tickers)} bars={len(panel)} train={args.train} test={args.test} '
+        f'n={panel.shape[1]} bars={len(panel)} train={args.train} test={args.test} '
         f'warmup={warmup} grid_combos={n_combos}'
     )
+    print(
+        f'Data context after filtering: surviving_names={panel.shape[1]} '
+        f'usable_rows={len(panel)} folds={fold_count(len(panel), args.train, args.test)}'
+    )
+
+    if panel.shape[1] < MIN_VALIDATION_NAMES:
+        print(
+            f'Warning: universe is too thin to validate after coverage filter '
+            f'({panel.shape[1]} names; need at least {MIN_VALIDATION_NAMES}).'
+        )
+        return
 
     if len(panel) < args.train + args.test:
         print(
@@ -217,6 +343,7 @@ def main() -> None:
         panel,
         GRID,
         show_fold_ranks=args.show_fold_ranks,
+        book=args.book,
         train=args.train,
         test=args.test,
         warmup=warmup,

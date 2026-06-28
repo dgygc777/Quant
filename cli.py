@@ -39,12 +39,14 @@ from quant.combined_signal import (
     print_strategy_comparison,
     run_strategy_comparison,
 )
+from quant.data_quality import MIN_COVERAGE, coverage_by_ticker, format_coverage
 from quant.models.cross_sectional import assess_panel_quality, print_panel_quality
 from quant.params import validate_xs_params
 from quant.models.cross_sectional import DEFAULT_TOP_FRAC
 from quant.registry import get_model, get_panel_model, list_models, list_panel_models, resolve_models
 from quant.report_builder import build_full_report, cli_usage_block
 from quant.reporting import print_model_comparison, run_model_backtest, run_panel_backtest
+from quant.risk_model import report_sizing
 from quant.universe_analysis import (
     analyze_universe_backtests,
     print_backtest_table,
@@ -68,6 +70,7 @@ from quant.momentum_presets import (
 )
 
 DEFAULT_COST = 0.0005
+MIN_RISK_REVIEW_NAMES = 6
 
 
 def resolve_portfolio_universe(args) -> tuple[str, list[str]]:
@@ -386,33 +389,466 @@ def _print_single_stock_snapshots(panel, weights, xs_scores, skip: bool,
                                   mom_params: dict | None = None,
                                   momentum_preset: str = 'mom_126d_skip21',
                                   risk_threshold: float = -0.30,
-                                  tenk_cache: str = 'tenk_cache.json') -> None:
+                                  tenk_cache: str = 'tenk_cache.json',
+                                  coverage: pd.Series | None = None) -> pd.DataFrame | None:
     if skip:
-        return
+        return None
     df = build_combined_snapshot_df(
         panel, weights, xs_scores, combined,
         mom_params=mom_params, momentum_preset=momentum_preset,
+        coverage=coverage, min_coverage=MIN_COVERAGE,
     )
-    print_combined_signal_report(
+    return print_combined_signal_report(
         df, combined, cache_path=tenk_cache, risk_threshold=risk_threshold,
     )
 
 
-def _print_wf_validation(panel: pd.DataFrame, train: int = 504, test: int = 63) -> None:
-    from validate_cross_sectional import GRID, WARMUP, report_panel_validation
+def _print_wf_validation(
+    panel: pd.DataFrame,
+    train: int = 504,
+    test: int = 63,
+    coverage: pd.Series | None = None,
+) -> dict | None:
+    from validate_cross_sectional import (
+        GRID,
+        MIN_VALIDATION_NAMES,
+        WARMUP,
+        report_panel_validation,
+    )
     print('\n=== Walk-forward validation (same universe / XS rules) ===')
     print('Full fold detail: python3 validate_cross_sectional.py --universe <preset>')
+    from quant.data_quality import filter_panel_by_coverage
+    panel, _, dropped = filter_panel_by_coverage(panel, MIN_COVERAGE, coverage=coverage)
+    if len(dropped):
+        print(f'Excluded from validation (coverage < {MIN_COVERAGE:.0%}): {format_coverage(dropped)}')
+    print(f'Validation survivors: {panel.shape[1]} names, {len(panel)} rows')
+    if panel.shape[1] < MIN_VALIDATION_NAMES:
+        print(
+            f'Validation skipped: universe is too thin after coverage filter '
+            f'({panel.shape[1]} names; need at least {MIN_VALIDATION_NAMES}).'
+        )
+        return None
     if len(panel) < train + test:
         print(f'Panel too short for WF ({len(panel)} bars; need {train + test}).')
-        return
-    report_panel_validation(
+        return None
+    wf = report_panel_validation(
         'Portfolio compare WF',
         panel,
         GRID,
+        book='long_only',
         train=train,
         test=test,
         warmup=WARMUP,
     )
+    oos = wf['oos_metrics']
+    return {
+        'folds': len(wf['folds']),
+        'oos_sharpe': oos['sharpe'],
+        'oos_ann_return': oos['ann_return'],
+        'oos_max_dd': oos['max_dd'],
+        'benchmark_oos_sharpe': wf.get('benchmark_oos_metrics', {}).get('sharpe'),
+        'benchmark_oos_ann_return': wf.get('benchmark_oos_metrics', {}).get('ann_return'),
+        'benchmark_oos_max_dd': wf.get('benchmark_oos_metrics', {}).get('max_dd'),
+        'active_oos_sharpe': wf.get('active_oos_sharpe'),
+        'validation_verdict': wf.get('validation_verdict'),
+    }
+
+
+def _ranked_risk_pool(weights: pd.Series, xs_scores: pd.Series,
+                      min_names: int = MIN_RISK_REVIEW_NAMES) -> tuple[list[str], list[str]]:
+    active_longs = weights[weights > 0].index.tolist()
+    scored = xs_scores.dropna().sort_values(ascending=False)
+    if scored.empty:
+        return active_longs, active_longs
+
+    target_count = min(len(scored), max(len(active_longs), min_names))
+    pool = scored.index[:target_count].tolist()
+    for ticker in active_longs:
+        if ticker not in pool:
+            pool.append(ticker)
+    return active_longs, pool
+
+
+def _print_ranked_candidate_risk(panel: pd.DataFrame, weights: pd.Series,
+                                 xs_scores: pd.Series, xs_params: dict,
+                                 years: int,
+                                 coverage: pd.Series | None = None) -> dict | None:
+    active_longs, risk_pool = _ranked_risk_pool(weights, xs_scores)
+    if not risk_pool:
+        print('\n=== Ranked Candidate Risk Review ===')
+        print('No ranked candidates to analyze.')
+        return None
+
+    ticker_coverage = coverage.reindex(panel.columns) if coverage is not None else coverage_by_ticker(panel)
+    pool_coverage = ticker_coverage.reindex(risk_pool).fillna(0.0)
+    coverage_ok = pool_coverage >= MIN_COVERAGE
+    speculative = pool_coverage.loc[~coverage_ok].sort_values()
+    risk_sized_pool = [ticker for ticker in risk_pool if bool(coverage_ok.get(ticker, False))]
+
+    print('\n=== Ranked Candidate Risk Review ===')
+    print(
+        f"Signal: {xs_params.get('momentum_preset', 'custom')} "
+        f"(lookback={xs_params.get('lookback')}, skip={xs_params.get('skip')})"
+    )
+    print(f'Active long leg ({len(active_longs)}): {_join_tickers(active_longs)}')
+    print(f'Ranked candidate pool ({len(risk_pool)}): {_join_tickers(risk_pool)}')
+    if len(speculative):
+        print(
+            'INSUFFICIENT HISTORY - speculative only, not validated or risk-sized '
+            f'(coverage): {format_coverage(speculative)}'
+        )
+    if not risk_sized_pool:
+        print('No coverage-approved candidate set remains for covariance sizing.')
+        return {
+            'active_longs': active_longs,
+            'risk_pool': risk_pool,
+            'risk_sized_pool': [],
+            'speculative': {str(ticker): float(cov) for ticker, cov in speculative.items()},
+            'coverage': {str(ticker): float(cov) for ticker, cov in pool_coverage.items()},
+            'sample_rows': 0,
+            'rc_pct_by_ticker': {},
+        }
+
+    returns = (
+        panel[risk_sized_pool]
+        .pct_change(fill_method=None)
+        .dropna(how='all')
+        .dropna(axis=1, how='all')
+    )
+    if returns.empty or returns.shape[1] == 0:
+        print('Not enough return history for the coverage-approved risk-sized pool.')
+        return {
+            'active_longs': active_longs,
+            'risk_pool': risk_pool,
+            'risk_sized_pool': [],
+            'speculative': {str(ticker): float(cov) for ticker, cov in speculative.items()},
+            'coverage': {str(ticker): float(cov) for ticker, cov in pool_coverage.items()},
+            'sample_rows': 0,
+            'rc_pct_by_ticker': {},
+        }
+
+    risk_sized_pool = list(returns.columns)
+    start_date = returns.index[0].date()
+    end_date = returns.index[-1].date()
+    print(f'Coverage-approved risk-sized pool ({len(risk_sized_pool)}): {_join_tickers(risk_sized_pool)}')
+    if len(risk_sized_pool) > len([t for t in active_longs if t in risk_sized_pool]):
+        print(
+            'Risk review uses the top-ranked candidate pool, not only the active long leg, '
+            'so concentration can inform selection before final sizing.'
+        )
+    print(
+        f'Covariance window: {len(returns)} daily return rows, '
+        f'{start_date} to {end_date} (--years {years})'
+    )
+    min_rows = max(5 * len(risk_sized_pool), 252)
+    if len(returns) < min_rows:
+        print(
+            f'Warning: covariance estimate is data-limited ({len(returns)} rows < {min_rows}); '
+            'min-variance weights in particular should not be trusted because they invert a noisy matrix.'
+        )
+    try:
+        report = report_sizing(returns, label='Ranked Candidate Risk-Pool')
+    except (AssertionError, ValueError, TypeError, FloatingPointError) as exc:
+        print(f'Risk sizing unavailable: {exc}')
+        return {
+            'active_longs': active_longs,
+            'risk_pool': risk_pool,
+            'risk_sized_pool': risk_sized_pool,
+            'speculative': {str(ticker): float(cov) for ticker, cov in speculative.items()},
+            'coverage': {str(ticker): float(cov) for ticker, cov in pool_coverage.items()},
+            'sample_rows': len(returns),
+            'rc_pct_by_ticker': {},
+        }
+
+    equal_rc = report['equal_risk_contributions']
+    max_ticker = str(equal_rc['pct_of_total'].idxmax())
+    min_ticker = str(equal_rc['pct_of_total'].idxmin())
+    return {
+        'active_longs': active_longs,
+        'risk_pool': risk_pool,
+        'risk_sized_pool': risk_sized_pool,
+        'speculative': {str(ticker): float(cov) for ticker, cov in speculative.items()},
+        'coverage': {str(ticker): float(cov) for ticker, cov in pool_coverage.items()},
+        'sample_rows': len(returns),
+        'sample_start': start_date.isoformat(),
+        'sample_end': end_date.isoformat(),
+        'equal_ann_vol': float(report['portfolio_volatility'].get('equal', float('nan'))),
+        'rc_pct_by_ticker': {
+            str(ticker): float(pct)
+            for ticker, pct in equal_rc['pct_of_total'].items()
+        },
+        'max_rc_ticker': max_ticker,
+        'max_rc_pct': float(equal_rc.loc[max_ticker, 'pct_of_total']),
+        'min_rc_ticker': min_ticker,
+        'min_rc_pct': float(equal_rc.loc[min_ticker, 'pct_of_total']),
+    }
+
+
+def _fmt_pct(value: float | None) -> str:
+    if value is None or pd.isna(value):
+        return 'n/a'
+    return f'{value:.1%}'
+
+
+def _fmt_float(value: float | None) -> str:
+    if value is None or pd.isna(value):
+        return 'n/a'
+    return f'{value:.2f}'
+
+
+def _join_tickers(tickers: list[str], max_items: int = 8) -> str:
+    tickers = [str(t) for t in tickers]
+    if not tickers:
+        return 'none'
+    if len(tickers) <= max_items:
+        return ', '.join(tickers)
+    return ', '.join(tickers[:max_items]) + f', ... (+{len(tickers) - max_items})'
+
+
+def _ticker_set_from_tenk(tenk_df: pd.DataFrame | None, mask: pd.Series) -> set[str]:
+    if tenk_df is None or tenk_df.empty:
+        return set()
+    return set(tenk_df[mask]['ticker'].astype(str))
+
+
+def _buy_strategy_conclusion(
+    preset: str,
+    xs_params: dict,
+    weights: pd.Series | None,
+    xs_scores: pd.Series | None,
+    validation_stats: dict | None,
+    tenk_df: pd.DataFrame | None,
+    sizing_stats: dict | None,
+    coverage: pd.Series | None = None,
+) -> str | None:
+    if weights is None or xs_scores is None:
+        return None
+
+    active_longs = weights[weights > 0].index.tolist()
+    risk_pool = list(sizing_stats.get('risk_pool', [])) if sizing_stats else []
+    if not risk_pool:
+        risk_pool = active_longs
+    risk_sized_pool = list(sizing_stats.get('risk_sized_pool', [])) if sizing_stats else []
+    speculative_map = dict(sizing_stats.get('speculative', {})) if sizing_stats else {}
+    if coverage is not None:
+        pool_coverage = coverage.reindex(risk_pool).fillna(0.0)
+        for ticker, cov in pool_coverage.items():
+            if cov < MIN_COVERAGE:
+                speculative_map[str(ticker)] = float(cov)
+        if not risk_sized_pool:
+            risk_sized_pool = [
+                ticker for ticker in risk_pool
+                if float(pool_coverage.get(ticker, 0.0)) >= MIN_COVERAGE
+            ]
+    coverage_bad = set(speculative_map)
+    if not active_longs and not risk_pool:
+        return (
+            'Validation verdict FAILS: no current ranked long leg is active, so this remains '
+            'a research/watchlist screen only. Standing caveat: this is a curated-universe '
+            'research overlay, not a validated edge.'
+        )
+
+    active_ranked = xs_scores.reindex(active_longs).dropna().sort_values(ascending=False)
+    risk_ranked = xs_scores.reindex(risk_pool).dropna().sort_values(ascending=False)
+    active_desc = ', '.join(
+        f'{ticker} {score:+.1%}' for ticker, score in active_ranked.items()
+        if not pd.isna(score)
+    )
+    if not active_desc:
+        active_desc = _join_tickers(active_longs)
+    risk_pool_desc = ', '.join(
+        f'{ticker} {score:+.1%}' for ticker, score in risk_ranked.items()
+        if not pd.isna(score)
+    )
+    if not risk_pool_desc:
+        risk_pool_desc = _join_tickers(risk_pool)
+
+    folds = int(validation_stats.get('folds', 0)) if validation_stats else 0
+    oos_sharpe = validation_stats.get('oos_sharpe') if validation_stats else None
+    oos_ann_return = validation_stats.get('oos_ann_return') if validation_stats else None
+    oos_max_dd = validation_stats.get('oos_max_dd') if validation_stats else None
+    benchmark_oos_sharpe = validation_stats.get('benchmark_oos_sharpe') if validation_stats else None
+    active_oos_sharpe = validation_stats.get('active_oos_sharpe') if validation_stats else None
+    verdict = validation_stats.get('validation_verdict') if validation_stats else 'FAILS'
+    validation_edge = verdict == 'EDGE'
+    if validation_edge:
+        validation_desc = (
+            f"Validation verdict EDGE: strategy OOS Sharpe {_fmt_float(oos_sharpe)} vs "
+            f"equal-weight benchmark {_fmt_float(benchmark_oos_sharpe)} "
+            f"(active {_fmt_float(active_oos_sharpe)}), "
+            f"ann return {_fmt_pct(oos_ann_return)}, max DD {_fmt_pct(oos_max_dd)} "
+            f"over {folds} folds."
+        )
+    elif verdict == 'MATCHES BENCHMARK — captures sector beta, not alpha':
+        validation_desc = (
+            f"Validation verdict {verdict}: strategy OOS Sharpe {_fmt_float(oos_sharpe)} vs "
+            f"benchmark {_fmt_float(benchmark_oos_sharpe)} "
+            f"(active {_fmt_float(active_oos_sharpe)}), max DD {_fmt_pct(oos_max_dd)}, "
+            f"folds {folds}; this is a research candidate that does not beat the basket."
+        )
+    else:
+        validation_desc = (
+            f"Validation verdict FAILS: the ranking has no validated benchmark-relative edge "
+            f"(strategy OOS Sharpe {_fmt_float(oos_sharpe)} vs benchmark "
+            f"{_fmt_float(benchmark_oos_sharpe)}, active {_fmt_float(active_oos_sharpe)}, "
+            f"max DD {_fmt_pct(oos_max_dd)}, folds {folds}), so the momentum list is a "
+            f"research/watchlist candidate screen only."
+        )
+
+    clean_vetted: list[str] = []
+    no_filing_data: list[str] = []
+    filing_flagged: list[str] = []
+    filing_flag_desc = 'filing-risk conflicts: none'
+    no_data_desc = 'no missing filing coverage in the ranked long leg'
+    if tenk_df is not None and not tenk_df.empty:
+        ticker_index = tenk_df.assign(ticker=tenk_df['ticker'].astype(str)).set_index('ticker', drop=False)
+        actions = tenk_df['final_action'].astype(str)
+        risk_flags = tenk_df['risk_flag'].fillna(False).astype(bool)
+        tenk_ok = tenk_df['tenk_ok'].fillna(False).astype(bool) if 'tenk_ok' in tenk_df else pd.Series(
+            False, index=tenk_df.index,
+        )
+        clean_mask = (actions == 'BUY') & ~risk_flags & tenk_ok
+        flagged_mask = risk_flags
+
+        clean_set = _ticker_set_from_tenk(tenk_df, clean_mask)
+        flagged_report = tenk_df[flagged_mask]['ticker'].astype(str).tolist()
+        filing_flagged = [ticker for ticker in risk_pool if ticker in set(flagged_report)]
+        for ticker in risk_pool:
+            if ticker in coverage_bad:
+                continue
+            if ticker not in ticker_index.index:
+                no_filing_data.append(f'{ticker} (no filing data)')
+            elif not bool(ticker_index.loc[ticker].get('tenk_ok', False)):
+                no_filing_data.append(f'{ticker} (no filing data)')
+            elif ticker in clean_set:
+                clean_vetted.append(ticker)
+
+        if flagged_report:
+            filing_flag_desc = (
+                'filing-risk conflicts: '
+                + '; '.join(f'{ticker} flagged - verify filing before sizing' for ticker in flagged_report)
+            )
+        if no_filing_data:
+            no_data_desc = 'filing coverage gaps: ' + ', '.join(no_filing_data)
+    else:
+        no_filing_data = [f'{ticker} (no filing data)' for ticker in risk_pool if ticker not in coverage_bad]
+        no_data_desc = 'filing coverage gaps: ' + ', '.join(no_filing_data)
+
+    if speculative_map:
+        speculative_series = pd.Series(speculative_map).sort_values()
+        speculative_desc = (
+            'insufficient-history speculative bucket: '
+            + format_coverage(speculative_series)
+            + ' - not validated or risk-sized'
+        )
+    else:
+        speculative_desc = 'insufficient-history speculative bucket: none'
+
+    rc_pct = dict(sizing_stats.get('rc_pct_by_ticker', {})) if sizing_stats else {}
+    if not risk_sized_pool and rc_pct:
+        risk_sized_pool = [ticker for ticker in risk_pool if ticker in rc_pct]
+    risk_contribution_pool = [ticker for ticker in risk_sized_pool if ticker in rc_pct]
+    equal_share = 1.0 / len(risk_contribution_pool) if risk_contribution_pool else float('nan')
+    concentration_threshold = 1.5 * equal_share if risk_contribution_pool else float('inf')
+    concentration_flags = [
+        ticker for ticker in risk_contribution_pool
+        if float(rc_pct.get(ticker, 0.0)) > concentration_threshold
+    ]
+    if sizing_stats and risk_contribution_pool:
+        if concentration_flags:
+            risk_desc = (
+                'risk-concentration flags: '
+                + '; '.join(
+                    f'{ticker} is a disproportionate risk contributor '
+                    f'({_fmt_pct(rc_pct[ticker])} vs equal-dollar {_fmt_pct(equal_share)})'
+                    for ticker in concentration_flags
+                )
+                + '; equal-dollar sizing is inappropriate - use risk-parity sizing instead'
+            )
+        else:
+            risk_desc = (
+                f"equal-weight risk contribution has no >1.5x concentration flag; highest is "
+                f"{sizing_stats['max_rc_ticker']} at {_fmt_pct(sizing_stats['max_rc_pct'])} "
+                f"with equal-weight annualized vol {_fmt_pct(sizing_stats['equal_ann_vol'])}"
+            )
+    else:
+        risk_desc = 'equal-weight risk contribution was not available for a coverage-approved pool'
+
+    contradiction_parts = []
+    for ticker in risk_pool:
+        lenses = []
+        if not validation_edge:
+            lenses.append(
+                'benchmark-relative validation'
+                if verdict == 'MATCHES BENCHMARK — captures sector beta, not alpha'
+                else 'negative validation regime'
+            )
+        if ticker in coverage_bad:
+            lenses.append('insufficient history')
+        if ticker in filing_flagged:
+            lenses.append('filing-risk flag')
+        if ticker in concentration_flags:
+            lenses.append('risk-concentration flag')
+        if lenses:
+            contradiction_parts.append(
+                f"{ticker} momentum-ranked but contradicted by {', '.join(lenses)} - "
+                f"do not treat as high-conviction"
+            )
+    contradiction_desc = (
+        'Contradictions: ' + '; '.join(contradiction_parts) + '.'
+        if contradiction_parts
+        else 'Contradictions: none among the ranked long names.'
+    )
+
+    if validation_edge:
+        actionable = [
+            ticker for ticker in active_longs
+            if ticker in clean_vetted
+            if ticker not in filing_flagged
+            if ticker not in coverage_bad
+        ]
+        action_desc = (
+            f"Actionable candidate list after filing and validation gates: {_join_tickers(actionable)}."
+            if actionable
+            else 'No actionable candidate survives the filing and validation gates.'
+        )
+    else:
+        no_filing_tickers = {item.split()[0] for item in no_filing_data}
+        research_names = [
+            ticker if ticker not in no_filing_tickers
+            else f'{ticker} (no filing data)'
+            for ticker in risk_pool
+            if ticker not in coverage_bad
+        ]
+        action_desc = f"Names to research: {', '.join(research_names) if research_names else 'none after coverage gate'}."
+
+    return (
+        f"{validation_desc} Momentum rank ({xs_params.get('momentum_preset', 'custom')}, "
+        f"lookback={xs_params.get('lookback')}, skip={xs_params.get('skip')}) selected active "
+        f"long leg {active_desc}; risk review pool {risk_pool_desc}; {speculative_desc}; "
+        f"{filing_flag_desc}; {no_data_desc}; {risk_desc}. "
+        f"{contradiction_desc} {action_desc} Standing caveat: this is a curated-universe "
+        f"research overlay, not a validated edge."
+    )
+
+
+def _print_buy_strategy_conclusion(
+    preset: str,
+    xs_params: dict,
+    weights: pd.Series | None,
+    xs_scores: pd.Series | None,
+    validation_stats: dict | None,
+    tenk_df: pd.DataFrame | None,
+    sizing_stats: dict | None,
+    coverage: pd.Series | None = None,
+) -> None:
+    conclusion = _buy_strategy_conclusion(
+        preset, xs_params, weights, xs_scores,
+        validation_stats, tenk_df, sizing_stats, coverage=coverage,
+    )
+    if conclusion:
+        print('\n=== Strategy Conclusion ===')
+        print(conclusion)
 
 
 def cmd_portfolio_universes(_args) -> None:
@@ -422,6 +858,7 @@ def cmd_portfolio_universes(_args) -> None:
 def cmd_portfolio_compare(args) -> None:
     preset, universe = resolve_portfolio_universe(args)
     panel = fetch_panel(universe, args.years)
+    coverage = coverage_by_ticker(panel)
     quality = assess_panel_quality(panel)
     print_panel_quality(quality)
     xs_params = panel_params_from_args(args)
@@ -431,20 +868,33 @@ def cmd_portfolio_compare(args) -> None:
     rows = run_strategy_comparison(panel, xs_params, combined, DEFAULT_COST)
     print_strategy_comparison(rows)
     print('\nBenchmark note: equal-weight is the universe basket; cash/zero is shown for L/S context.')
+    validation_stats = None
     if getattr(args, 'validate', False):
-        _print_wf_validation(panel)
+        validation_stats = _print_wf_validation(panel, coverage=coverage)
+    weights = None
+    scores = None
+    tenk_df = None
+    sizing_stats = None
     if not args.no_single_stock:
         model = get_panel_model()
         weights = model.current_weights(panel, **xs_params)
         scores = model.current_ranks(panel, **xs_params)
-        _print_single_stock_snapshots(
+        tenk_df = _print_single_stock_snapshots(
             panel, weights, scores, False, combined,
             mom_params=mom_params_from_panel(xs_params),
             momentum_preset=xs_params['momentum_preset'],
             risk_threshold=args.risk_threshold,
             tenk_cache=args.tenk_cache,
+            coverage=coverage,
+        )
+        sizing_stats = _print_ranked_candidate_risk(
+            panel, weights, scores, xs_params, args.years, coverage=coverage,
         )
     print(f'\nUniverse preset: {preset} — {describe_preset(preset)}')
+    _print_buy_strategy_conclusion(
+        preset, xs_params, weights, scores,
+        validation_stats, tenk_df, sizing_stats, coverage=coverage,
+    )
 
 
 def cmd_portfolio_backtest(args) -> None:
@@ -454,6 +904,7 @@ def cmd_portfolio_backtest(args) -> None:
 
     preset, universe = resolve_portfolio_universe(args)
     panel = fetch_panel(universe, args.years)
+    coverage = coverage_by_ticker(panel)
     params = panel_params_from_args(args)
     validate_momentum_params(params['lookback'], params['skip'], n_days=len(panel))
     model = get_panel_model()
@@ -522,6 +973,7 @@ def cmd_portfolio_backtest(args) -> None:
             momentum_preset=xs_params['momentum_preset'],
             risk_threshold=args.risk_threshold,
             tenk_cache=args.tenk_cache,
+            coverage=coverage,
         )
 
 
@@ -540,6 +992,7 @@ def cmd_portfolio_momentum_compare(args) -> None:
 def cmd_portfolio_ranks(args) -> None:
     preset, universe = resolve_portfolio_universe(args)
     panel = fetch_panel(universe, max(2, args.years))
+    coverage = coverage_by_ticker(panel)
     print_panel_quality(assess_panel_quality(panel))
     params = panel_params_from_args(args)
     validate_momentum_params(params['lookback'], params['skip'], n_days=len(panel))
@@ -566,6 +1019,7 @@ def cmd_portfolio_ranks(args) -> None:
             momentum_preset=params['momentum_preset'],
             risk_threshold=args.risk_threshold,
             tenk_cache=args.tenk_cache,
+            coverage=coverage,
         )
     if not getattr(args, 'no_math', False):
         print(model.explain_math(**params))

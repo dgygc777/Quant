@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from quant.data_quality import EXTREME_DAILY_RETURN, coverage_by_ticker
 from quant.params import validate_xs_params
 
 from quant.models.panel_base import PanelModel
@@ -10,7 +11,6 @@ from quant.universes import DEFAULT_UNIVERSE, DEFAULT_PRESET, universe_selection
 
 # Re-export for backward compatibility.
 DEFAULT_TOP_FRAC = 0.25
-EXTREME_DAILY_RETURN = 0.35
 
 
 def assess_panel_quality(prices: pd.DataFrame) -> dict:
@@ -18,10 +18,9 @@ def assess_panel_quality(prices: pd.DataFrame) -> dict:
     rets = prices.pct_change(fill_method=None)
     latest = prices.index[-1] if len(prices.index) else None
     excluded: list[tuple[str, str]] = []
-    coverage: dict[str, float] = {}
+    coverage = coverage_by_ticker(prices).to_dict()
     for col in prices.columns:
         s = prices[col].dropna()
-        coverage[col] = len(s) / max(len(prices), 1)
         if s.empty:
             excluded.append((col, 'no data'))
             continue

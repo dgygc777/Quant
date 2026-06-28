@@ -25,6 +25,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from quant.data_quality import MIN_COVERAGE, coverage_by_ticker, format_coverage
 from quant.metrics import metrics
 from quant.models.cross_sectional import (
     build_weights,
@@ -144,12 +145,15 @@ def build_combined_snapshot_df(panel: pd.DataFrame, xs_weights: pd.Series,
                                xs_scores: pd.Series,
                                p: CombinedParams,
                                mom_params: dict | None = None,
-                               momentum_preset: str = 'mom_126d_skip21') -> pd.DataFrame:
+                               momentum_preset: str = 'mom_126d_skip21',
+                               coverage: pd.Series | None = None,
+                               min_coverage: float = MIN_COVERAGE) -> pd.DataFrame:
     """Latest combined signal row per ticker."""
     from quant.universe_analysis import snapshot_ticker
 
     mr_model, mom_model = MeanReversionModel(), MomentumModel()
     mom_p = {**mom_model.default_params(), **(mom_params or {})}
+    ticker_coverage = coverage.reindex(panel.columns) if coverage is not None else coverage_by_ticker(panel)
     rows = []
     for ticker in panel.columns:
         snap = snapshot_ticker(
@@ -159,11 +163,14 @@ def build_combined_snapshot_df(panel: pd.DataFrame, xs_weights: pd.Series,
         action, reason = apply_combined_to_row(
             leg, snap['z'], snap['mr_signal'], snap['mom_signal'], p,
         )
+        cov = float(ticker_coverage.get(ticker, 0.0))
         rows.append({
             **snap,
             'xs_score': float(xs_scores.get(ticker, float('nan'))),
             'xs_leg': leg,
             'momentum_preset': momentum_preset,
+            'coverage': cov,
+            'coverage_ok': cov >= min_coverage,
             'final_action': action,
             'reason': reason,
         })
@@ -207,18 +214,29 @@ def print_combined_signal_report(
     *,
     cache_path: str = 'tenk_cache.json',
     risk_threshold: float = DEFAULT_RISK_FLAG_THRESHOLD,
-) -> None:
+) -> pd.DataFrame:
     df = attach_tenk_metadata(df, cache_path=cache_path, risk_threshold=risk_threshold)
     print('\n=== Combined Signal Report ===')
     if p.long_only_mode:
         print('Long-only mode: short leg is treated as avoid/underweight, not actual short positions.')
 
-    clean_buys = df[(df['final_action'] == 'BUY') & ~df['risk_flag']]['ticker'].tolist()
-    conflict_buys = df[df['risk_flag']]['ticker'].tolist()
+    coverage_ok = (
+        df['coverage_ok'].fillna(False).astype(bool)
+        if 'coverage_ok' in df
+        else pd.Series(True, index=df.index)
+    )
+    clean_buys = df[(df['final_action'] == 'BUY') & ~df['risk_flag'] & coverage_ok]['ticker'].tolist()
+    conflict_buys = df[df['risk_flag'] & coverage_ok]['ticker'].tolist()
     if clean_buys:
         print(f'Actionable BUY candidates ({len(clean_buys)}): {", ".join(clean_buys)}')
     if conflict_buys:
         print(f'BUY candidates with filing-risk conflict ({len(conflict_buys)}): {", ".join(conflict_buys)}')
+    if 'coverage' in df and (~coverage_ok).any():
+        sparse = df.loc[~coverage_ok].set_index('ticker')['coverage'].sort_values()
+        print(
+            'INSUFFICIENT HISTORY - speculative only, not validated or risk-sized '
+            f'(coverage): {format_coverage(sparse)}'
+        )
 
     headers = [
         'Ticker', 'XS', 'XS score', 'Price', 'Z', 'MR', 'Mom preset', 'Mom score',
@@ -256,6 +274,7 @@ def print_combined_signal_report(
         '10KΔ = YoY risk-language change (cached); ⚠RISK↑ = BUY signal conflicts with '
         'worsening filing. Run tenk_reader.py to refresh.'
     )
+    return df
 
 
 def _rebalance_days(n: int, rebalance: int) -> set[int]:
