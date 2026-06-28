@@ -26,6 +26,8 @@ class TenkCacheEntry:
     comparison_type: str | None = None
     section_used: str | None = None
     match_method: str | None = None
+    non_comparable_reason: str | None = None
+    candidate_lengths: dict | None = None
 
 
 def _parse_filing_date(raw: str | None) -> date | None:
@@ -100,6 +102,8 @@ def load_tenk_scores(
             comparison_type=val.get('comparison_type'),
             section_used=val.get('section_used'),
             match_method=val.get('match_method'),
+            non_comparable_reason=val.get('non_comparable_reason'),
+            candidate_lengths=val.get('candidate_lengths'),
         )
         prev = by_ticker.get(tkr)
         prev_date = prev[0] if prev else None

@@ -76,6 +76,51 @@ class TestQuantGuards(unittest.TestCase):
             self.assertEqual(clean, ['MU'])
             self.assertEqual(conflict, ['INTC'])
 
+    def test_quarterly_score_flags_risk_and_20f_only_is_labeled(self):
+        df = pd.DataFrame([
+            {'ticker': 'AMAT', 'final_action': 'BUY', 'xs_score': 0.2, 'xs_leg': 'LONG',
+             'price': 1, 'z': 0, 'mr_signal': 'WAIT', 'momentum': 0.2, 'mom_signal': 'BUY',
+             'momentum_preset': 'mom_10d', 'reason': 'ok'},
+            {'ticker': 'ASX', 'final_action': 'BUY', 'xs_score': 0.1, 'xs_leg': 'LONG',
+             'price': 1, 'z': 0, 'mr_signal': 'WAIT', 'momentum': 0.1, 'mom_signal': 'BUY',
+             'momentum_preset': 'mom_10d', 'reason': 'ok'},
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'tenk_cache.json'
+            path.write_text(json.dumps({
+                'AMAT:2025-12-12': {
+                    'source': 'annual',
+                    'change_score': 0.05,
+                    'ok': True,
+                    'current_filing_date': '2025-12-12',
+                    'form': '10-K',
+                },
+                'AMAT:2026-05-21': {
+                    'source': 'quarterly',
+                    'change_score': -0.35,
+                    'ok': True,
+                    'current_filing_date': '2026-05-21',
+                    'form': '10-Q',
+                    'section_used': 'risk_factors',
+                },
+                'ASX:2026-04-01': {
+                    'source': 'annual',
+                    'change_score': 0.15,
+                    'ok': True,
+                    'current_filing_date': '2026-04-01',
+                    'form': '20-F',
+                },
+            }), encoding='utf-8')
+
+            out = attach_tenk_metadata(df, cache_path=str(path), risk_threshold=-0.30)
+
+            amat = out.set_index('ticker').loc['AMAT']
+            asx = out.set_index('ticker').loc['ASX']
+            self.assertEqual(float(amat['tenq_score']), -0.35)
+            self.assertTrue(bool(amat['risk_flag']))
+            self.assertEqual(asx['filing_report'], '20-F only (no 10-Q)')
+            self.assertFalse(bool(asx['risk_flag']))
+
 
 if __name__ == '__main__':
     unittest.main()

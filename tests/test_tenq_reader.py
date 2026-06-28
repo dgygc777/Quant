@@ -114,6 +114,60 @@ Equity text.
 """
 
 
+def _tenq_text_with_late_reference_index(risk_text: str, *, mda_text: str | None = None) -> str:
+    mda_text = mda_text if mda_text is not None else _mda_words(150)
+    return f"""
+Forward-Looking Statements
+General introduction.
+
+Table of Contents
+
+Management's Discussion and Analysis
+
+Overview
+This is the real operating discussion, not the reference index.
+{mda_text}
+
+Risk Factors and Other Key Information
+
+Risk Factors
+{risk_text}
+
+Quantitative and Qualitative Disclosures About Market Risk
+Market risk body.
+
+Controls and Procedures
+Controls body.
+
+Form 10-Q Cross-Reference Index
+
+Reference Index
+Item Number                   Item
+Part I - Financial
+Information
+Item 1.                       Financial Statements            Pages3-25
+                                Management's Discussion and
+Item 2.                       Analysis of Financial
+                                Condition and Results of
+                                Operations
+                                Results of operations           Pages28-36
+                                Liquidity and capital           Pages36-38
+                                resources
+                                Critical accounting             Not applicable
+                                estimates
+                                Quantitative and Qualitative
+Item 3.                       Disclosures About Market        Page39
+                                Risk
+Item 4.                       Controls and Procedures         Page39
+Part II - Other
+Information
+Item 1.                       Legal Proceedings               Pages20-23
+Item 1A.                      Risk Factors                    Page39
+Item 2.                       Securities and Use of           Page39
+                                Proceeds
+"""
+
+
 class TestTenQReader(unittest.TestCase):
     def test_10q_risk_section_returns_part_ii_item_1a_when_full(self):
         text = _tenq_text(_risk_words())
@@ -195,6 +249,27 @@ class TestTenQReader(unittest.TestCase):
         self.assertIn('adversely', candidates['risk_factors'].section)
         self.assertTrue(selection.ok)
         self.assertEqual(selection.section_used, 'risk_factors')
+
+    def test_late_reference_index_does_not_beat_standalone_mda_body(self):
+        stub = 'The risks described in our Form 10-K could materially affect us.'
+        text = _tenq_text_with_late_reference_index(stub, mda_text='real mda body ' + _mda_words(180))
+        reference_slice = """
+Reference Index
+Item Number                   Item
+Item 1.                       Financial Statements            Pages3-25
+Item 3.                       Disclosures About Market        Page39
+Item 4.                       Controls and Procedures         Page39
+"""
+
+        candidates = extract_quarterly_section_candidates(text)
+        selection = select_quarterly_comparison_sections(text, text)
+
+        self.assertTrue(_is_toc_slice(reference_slice))
+        self.assertGreater(candidates['mda'].candidate_lengths['mda'], 2_000)
+        self.assertIn('real mda body', candidates['mda'].section)
+        self.assertNotIn('Reference Index', candidates['mda'].section[:300])
+        self.assertTrue(selection.ok)
+        self.assertEqual(selection.section_used, 'mda_both')
 
     def test_quarterly_matching_prefers_year_over_year(self):
         records = [

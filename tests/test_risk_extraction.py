@@ -37,6 +37,26 @@ class TestRiskExtraction(unittest.TestCase):
         self.assertTrue(detail.ok)
         self.assertIn('uncertain', detail.section)
 
+    def test_20f_inline_item4_cross_reference_does_not_end_section(self):
+        risk_text = ' '.join([
+            'risk', 'adversely', 'could', 'uncertain', 'no assurance',
+            'fluctuat', 'harm', 'may not', 'subject to',
+        ] * 80)
+        text = (
+            'Item 3. Key Information - D. Risk Factors\n'
+            f'{risk_text}\n'
+            'For more information, see Item 4. Information on the Company.\n'
+            'This sentence is still part of the risk factor section and should remain.\n'
+            'Item 4. Information on the Company\n'
+            'Company description should not be included.'
+        )
+
+        detail = extract_risk_section_detail(text, '20-F')
+
+        self.assertTrue(detail.ok)
+        self.assertIn('This sentence is still part of the risk factor section', detail.section)
+        self.assertNotIn('Company description should not be included', detail.section)
+
     def test_toc_rejected(self):
         text = 'Item 1A. Risk Factors                12    Item 1B. foo'
         detail = extract_risk_section_detail(text, '10-K')

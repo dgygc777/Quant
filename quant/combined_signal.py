@@ -36,7 +36,7 @@ from quant.models.cross_sectional import (
 from quant.models.mean_reversion import MeanReversionModel
 from quant.models.momentum import MomentumModel
 from quant.table_format import print_table
-from quant.tenk_cache import load_tenk_scores
+from quant.tenk_cache import load_tenk_scores, load_tenq_scores
 
 DEFAULT_RISK_FLAG_THRESHOLD = -0.30
 
@@ -184,26 +184,61 @@ def attach_tenk_metadata(
     cache_path: str = 'tenk_cache.json',
     risk_threshold: float = DEFAULT_RISK_FLAG_THRESHOLD,
 ) -> pd.DataFrame:
-    """Add tenk_score, filing metadata, and risk_flag columns from cache."""
-    tenk = load_tenk_scores(cache_path)
+    """Add annual/quarterly filing metadata and risk_flag columns from cache."""
+    tenk = load_tenk_scores(cache_path, include_failed=True)
+    tenq = load_tenq_scores(cache_path, include_failed=True)
     out = df.copy()
     scores: list[float | None] = []
     filing_dates: list[str | None] = []
+    tenk_forms: list[str | None] = []
+    tenq_scores: list[float | None] = []
+    tenq_dates: list[str | None] = []
+    tenq_sections: list[str | None] = []
+    filing_reports: list[str] = []
     tenk_ok: list[bool] = []
     risk_flags: list[bool] = []
     for _, row in out.iterrows():
-        entry = tenk.get(str(row['ticker']).upper())
-        score = entry.change_score if entry else None
-        scores.append(score)
+        ticker = str(row['ticker']).upper()
+        entry = tenk.get(ticker)
+        q_entry = tenq.get(ticker)
+        annual_score = entry.change_score if entry and entry.ok else None
+        quarterly_score = q_entry.change_score if q_entry and q_entry.ok else None
+        scores.append(annual_score)
         filing_dates.append(entry.filing_date.isoformat() if entry and entry.filing_date else None)
-        tenk_ok.append(bool(entry and entry.ok and score is not None))
+        tenk_forms.append(entry.form if entry else None)
+        tenq_scores.append(quarterly_score)
+        tenq_dates.append(q_entry.filing_date.isoformat() if q_entry and q_entry.filing_date else None)
+        tenq_sections.append(q_entry.section_used if q_entry else None)
+        has_scored_filing = annual_score is not None or quarterly_score is not None
+        tenk_ok.append(has_scored_filing)
+        if q_entry and q_entry.ok and quarterly_score is not None:
+            filing_report = f'10-Q {q_entry.filing_date.isoformat() if q_entry.filing_date else ""}'.strip()
+        elif q_entry and not q_entry.ok:
+            reason = q_entry.non_comparable_reason or q_entry.summary or 'not scored'
+            filing_report = f'10-Q not scored ({reason})'
+        elif entry and str(entry.form or '').upper() == '20-F':
+            filing_report = '20-F only (no 10-Q)'
+        elif entry and str(entry.form or '').upper() == '10-K':
+            filing_report = '10-K only (no 10-Q cache)'
+        elif entry:
+            filing_report = f'{entry.form or "annual"} only'
+        else:
+            filing_report = 'no filing data'
+        filing_reports.append(filing_report)
         risk_flags.append(
             row['final_action'] == 'BUY'
-            and score is not None
-            and score <= risk_threshold
+            and (
+                (annual_score is not None and annual_score <= risk_threshold)
+                or (quarterly_score is not None and quarterly_score <= risk_threshold)
+            )
         )
     out['tenk_score'] = scores
     out['tenk_filing_date'] = filing_dates
+    out['tenk_form'] = tenk_forms
+    out['tenq_score'] = tenq_scores
+    out['tenq_filing_date'] = tenq_dates
+    out['tenq_section'] = tenq_sections
+    out['filing_report'] = filing_reports
     out['tenk_ok'] = tenk_ok
     out['risk_flag'] = risk_flags
     return out
@@ -241,7 +276,7 @@ def print_combined_signal_report(
 
     headers = [
         'Ticker', 'XS', 'XS score', 'Price', 'Z', 'MR', 'Mom preset', 'Mom score',
-        'Mom sig', '10KΔ', 'Final', 'Reason',
+        'Mom sig', 'Filing', '10K/20FΔ', '10QΔ', 'Final', 'Reason',
     ]
     rows: list[list[str]] = []
     for _, r in df.iterrows():
@@ -250,10 +285,18 @@ def print_combined_signal_report(
             tenk_cell = f'{float(score):+.2f}'
         else:
             tenk_cell = '—'
+        q_score = r.get('tenq_score')
+        if isinstance(q_score, (int, float)) and q_score is not None and not pd.isna(q_score):
+            tenq_cell = f'{float(q_score):+.2f}'
+        else:
+            tenq_cell = '—'
         final = str(r['final_action'])
         if r.get('risk_flag'):
             final = f'{final} ⚠RISK↑'
         reason_short = r['reason'] if len(r['reason']) <= 38 else r['reason'][:35] + '...'
+        filing_report = str(r.get('filing_report', '—'))
+        if len(filing_report) > 30:
+            filing_report = filing_report[:27] + '...'
         rows.append([
             str(r['ticker']),
             str(r['xs_leg']),
@@ -264,7 +307,9 @@ def print_combined_signal_report(
             str(r.get('momentum_preset', 'mom_126d_skip21')),
             f"{r['momentum']:+.1%}",
             str(r['mom_signal']),
+            filing_report,
             tenk_cell,
+            tenq_cell,
             final,
             reason_short,
         ])
@@ -272,8 +317,9 @@ def print_combined_signal_report(
     print_table(headers, rows)
     print()
     print(
-        '10KΔ = YoY risk-language change (cached); ⚠RISK↑ = BUY signal conflicts with '
-        'worsening filing. Run tenk_reader.py to refresh.'
+        '10K/20FΔ and 10QΔ = cached filing-language change; Filing marks 20-F-only '
+        'foreign issuers and unscored 10-Qs; ⚠RISK↑ = BUY signal conflicts with '
+        'worsening annual or quarterly filing. Run tenk_reader.py to refresh.'
     )
     return df
 

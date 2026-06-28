@@ -699,6 +699,29 @@ def run(
                     'non_comparable_reason': selection.reject_reason or 'non-comparable sections',
                     'ok': False,
                 }
+                cache[cache_key] = {
+                    'source': 'quarterly',
+                    'comparison_type': pair['comparison_type'],
+                    'section_used': selection.section_used,
+                    'match_method': pair['match_method'],
+                    'change_score': None,
+                    'summary': result['summary'],
+                    'confidence': None,
+                    'non_comparable_reason': result['non_comparable_reason'],
+                    'prior_filing_date': prior_date,
+                    'current_filing_date': current_date,
+                    'form': current_form,
+                    'prior_form': prior_form,
+                    'current_period': pair.get('current_period'),
+                    'prior_period': pair.get('prior_period'),
+                    'model': model,
+                    'scored_at': datetime.now(timezone.utc).isoformat(),
+                    'extraction_quality': selection.current_detail.quality_score,
+                    'section_preview': selection.current_detail.heading_preview[:500],
+                    'candidate_lengths': selection.candidate_lengths,
+                    'ok': False,
+                }
+                save_cache(cache, cache_path)
             elif use_cache:
                 result = cached
                 print(

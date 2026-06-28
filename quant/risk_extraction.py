@@ -50,6 +50,27 @@ _TOC_ITEM_LINE = re.compile(
     r'^\s*item\s+(?:\d+[a-z]?|[ivx]+)\b.*(?:\s{2,}|[.\u2026]{2,})\d{1,4}\s*$',
     re.IGNORECASE,
 )
+_TOC_PAGE_REF_LINE = re.compile(
+    r'^\s*(?:item\s+(?:\d+[a-z]?|[ivx]+)\b|'
+    r'risk\s+factors\b|management[’\']?s\s+discussion\b|'
+    r'analysis\b|quantitative\s+and\s+qualitative\b|'
+    r'controls\s+and\s+procedures\b|results\s+of\s+operations\b|'
+    r'liquidity\s+and\s+capital\b|critical\s+accounting\b).*'
+    r'(?:\bpages?\s*\d|\bnot\s+applicable\b|\d{1,4}\s*$)',
+    re.IGNORECASE,
+)
+_TOC_RIGHT_PAGE_LINE = re.compile(
+    r'^\s*[A-Za-z][A-Za-z0-9&(),/’\'\-\s]{2,90}'
+    r'(?:\s{2,}|\s+pages?)\d{1,4}(?:-\d{1,4})?\s*$',
+    re.IGNORECASE,
+)
+_INDEX_CONTEXT_LINE = re.compile(
+    r'^\s*(?:form\s+10-q\s+cross-reference\s+index|cross-reference\s+index|'
+    r'reference\s+index|table\s+of\s+contents|item\s+number\s+item|'
+    r'part\s+i{1,2}\b.*|information\s*|'
+    r'management[’\']?s\s+discussion\s+and\s*|analysis\s*|\(md&a\)\s*)$',
+    re.IGNORECASE,
+)
 _MIN_SLICE = 200
 _HEAD_WINDOW = 1_200
 _RISK_HEADING = re.compile(
@@ -79,6 +100,15 @@ _ANCHORED_20F = re.compile(
 )
 _STANDALONE_RISK = re.compile(
     r'(?:^|\n|\r)\s*(?:RISK\s+FACTORS|Risk\s+Factors)\s*(?:\n|\r|$)',
+)
+_ANNUAL_10K_END_RE = re.compile(
+    r'\b(?:item\s+(?:1b|2|3)\b[\.:：\-–—]?|unresolved\s+staff\s+comments\b)',
+    re.IGNORECASE,
+)
+_ANNUAL_20F_END_RE = re.compile(
+    r'(?:^|\n|\r)[\s>|│┃║#*\-–—•╭╰╮╯]*'
+    r'item\s+[45]\b[\.:：\-–—]?',
+    re.IGNORECASE,
 )
 
 
@@ -125,6 +155,12 @@ def _is_toc_slice(section: str) -> bool:
     if not section:
         return False
     head = section[:600].replace('\xa0', ' ')
+    if re.search(
+        r'(?im)^\s*(?:form\s+10-q\s+cross-reference\s+index|'
+        r'cross-reference\s+index|reference\s+index)\s*$',
+        head,
+    ):
+        return True
     if _TOC_LINE.search(head):
         return True
     if _TOC_ITEM_LINE.search(head):
@@ -133,7 +169,19 @@ def _is_toc_slice(section: str) -> bool:
         return True
     lines = [line.strip() for line in head.splitlines() if line.strip()]
     item_lines = [line for line in lines if _TOC_ITEM_LINE.search(line)]
+    page_ref_lines = [line for line in lines if _TOC_PAGE_REF_LINE.search(line)]
+    right_page_lines = [line for line in lines if _TOC_RIGHT_PAGE_LINE.search(line)]
+    item_heading_lines = [
+        line for line in lines
+        if re.match(r'\s*item\s+\d+[a-z]?\b', line, re.IGNORECASE)
+    ]
     if len(item_lines) >= 2:
+        return True
+    if len(page_ref_lines) >= 2:
+        return True
+    if len(right_page_lines) >= 2:
+        return True
+    if len(item_heading_lines) >= 2 and page_ref_lines:
         return True
     if lines and re.match(r'\s*item\s+\d+[a-z]?\b', lines[0], re.IGNORECASE):
         next_lines = '\n'.join(lines[1:4])
@@ -176,6 +224,7 @@ def _candidate_score(section: str, start_pos: int, form_key: str) -> float:
     score += min(cue_count, 80) * 4.0
     score += min(cue_density, 35.0) * 6.0
 
+    anchored_annual_heading = _ANCHORED_10K.search(head) or _ANCHORED_20F.search(head)
     if _RISK_FACTORS_HEADING.search(head):
         score += 360.0
     elif _PRINCIPAL_RISKS_HEADING.search(head):
@@ -188,7 +237,7 @@ def _candidate_score(section: str, start_pos: int, form_key: str) -> float:
         score -= 260.0
     if re.search(r'\bd\.\s*risk\s*factors\b', head, re.IGNORECASE):
         score += 200.0
-    if _ANCHORED_10K.search(head) or _ANCHORED_20F.search(head):
+    if anchored_annual_heading:
         score += 180.0
     if _STANDALONE_RISK.search(head):
         score += 160.0
@@ -211,13 +260,22 @@ def _candidate_score(section: str, start_pos: int, form_key: str) -> float:
         score -= 200.0
     if re.search(r'\bprincipal\s+risks\s+and\s+opportunities\b', head_low):
         score -= 280.0
-    if re.search(r'\bsustainability|esg\s+committee|governance\b', head_low):
+    if not anchored_annual_heading and re.search(r'\bsustainability|esg\s+committee|governance\b', head_low):
         score -= 120.0
     if cue_count < 15:
         score -= 300.0
 
     score += min(start_pos / max(RISK_CAP, 1), 20.0)
     return score
+
+
+def _annual_end_pos(text: str, start: int, form_key: str) -> int:
+    """Find the next annual item heading without stopping on inline cross-references."""
+    end_re = _ANNUAL_20F_END_RE if form_key == '20-F' else _ANNUAL_10K_END_RE
+    match = end_re.search(text, start + 50)
+    if match:
+        return match.start()
+    return start + RISK_CAP
 
 
 _LINE_PREFIX = r'(?:^|\n|\r)[\s>|│┃║#*\-–—•╭╰╮╯]*'
@@ -240,6 +298,31 @@ _TENQ_ITEM3_4_RE = re.compile(_LINE_PREFIX + r'item\s+[34]\b' + _ITEM_PUNCT, re.
 _TENQ_PART_II_RE = re.compile(_LINE_PREFIX + r'part\s+ii\b' + _ITEM_PUNCT, re.IGNORECASE)
 _TENQ_PART_I_END_RE = re.compile(
     _LINE_PREFIX + r'(?:item\s+[34]\b' + _ITEM_PUNCT + r'|part\s+ii\b' + _ITEM_PUNCT + r')',
+    re.IGNORECASE,
+)
+_TENQ_STANDALONE_MDA_RE = re.compile(
+    _LINE_PREFIX
+    + r'management[’\']?s\s+discussion\s+and\s+analysis',
+    re.IGNORECASE,
+)
+_TENQ_STANDALONE_RISK_RE = re.compile(
+    _LINE_PREFIX + r'risk\s+factors\b',
+    re.IGNORECASE,
+)
+_TENQ_MARKET_RISK_RE = re.compile(
+    _LINE_PREFIX + r'quantitative\s+and\s+qualitative\s+disclosures\s+about\s+market\s+risk\b',
+    re.IGNORECASE,
+)
+_TENQ_CONTROLS_RE = re.compile(
+    _LINE_PREFIX + r'controls\s+and\s+procedures\b',
+    re.IGNORECASE,
+)
+_TENQ_RISK_AND_OTHER_RE = re.compile(
+    _LINE_PREFIX + r'risk\s+factors\s+and\s+other\s+key\s+information\b',
+    re.IGNORECASE,
+)
+_TENQ_ISSUER_PURCHASES_RE = re.compile(
+    _LINE_PREFIX + r'issuer\s+purchases\s+of\s+equity\s+securities\b',
     re.IGNORECASE,
 )
 _MDA_HEADING_RE = re.compile(
@@ -280,19 +363,15 @@ def _line_spans(text: str):
 
 def _toc_spans(text: str) -> list[tuple[int, int]]:
     """Locate likely table-of-contents regions so body matching can ignore them."""
-    scan_limit = min(len(text), 80_000)
+    scan_limit = len(text)
     lines = [(st, en, line) for st, en, line in _line_spans(text[:scan_limit])]
-    heading_re = re.compile(r'table\s+of\s+contents', re.IGNORECASE)
-    heading_idx = None
-    for idx, (_, _, line) in enumerate(lines):
-        if heading_re.search(lines[idx][2]):
-            heading_idx = idx
-            break
-
     item_idxs = [
         idx for idx, (_, _, line) in enumerate(lines)
-        if (heading_idx is None or idx >= heading_idx)
-        and _TOC_ITEM_LINE.search(line.replace('\xa0', ' '))
+        if (
+            _TOC_ITEM_LINE.search(line.replace('\xa0', ' '))
+            or _TOC_PAGE_REF_LINE.search(line.replace('\xa0', ' '))
+            or _TOC_RIGHT_PAGE_LINE.search(line.replace('\xa0', ' '))
+        )
     ]
     if not item_idxs:
         return []
@@ -301,7 +380,7 @@ def _toc_spans(text: str) -> list[tuple[int, int]]:
     run: list[int] = []
     prev = None
     for idx in item_idxs:
-        if prev is None or idx - prev <= 3:
+        if prev is None or idx - prev <= 12:
             run.append(idx)
         else:
             runs.append(run)
@@ -312,29 +391,30 @@ def _toc_spans(text: str) -> list[tuple[int, int]]:
     if not viable_runs:
         return []
 
-    toc_run = viable_runs[0] if heading_idx is not None else viable_runs[0]
-    first_line = toc_run[0]
-    last_line = toc_run[-1]
-
-    if heading_idx is not None:
-        start = lines[heading_idx][0]
-    else:
+    spans = []
+    for toc_run in viable_runs:
+        first_line = toc_run[0]
+        last_line = toc_run[-1]
         start_line = first_line
-        while start_line > 0:
-            prev_line = lines[start_line - 1][2]
-            if re.match(r'^\s*(?:part\s+i{1,2}\b|\s*)$', prev_line, re.IGNORECASE):
+        while start_line > 0 and first_line - start_line <= 8:
+            prev_line = lines[start_line - 1][2].replace('\xa0', ' ')
+            if _INDEX_CONTEXT_LINE.match(prev_line):
+                start_line -= 1
+                continue
+            if re.match(r'^\s*$', prev_line):
                 start_line -= 1
                 continue
             break
         start = lines[start_line][0]
-    end_line = last_line
-    while end_line + 1 < len(lines):
-        next_line = lines[end_line + 1][2]
-        if re.match(r'^\s*$', next_line):
-            end_line += 1
-            continue
-        break
-    return [(start, lines[end_line][1])]
+        end_line = last_line
+        while end_line + 1 < len(lines):
+            next_line = lines[end_line + 1][2].replace('\xa0', ' ')
+            if re.match(r'^\s*$', next_line) or _INDEX_CONTEXT_LINE.match(next_line):
+                end_line += 1
+                continue
+            break
+        spans.append((start, lines[end_line][1]))
+    return spans
 
 
 def _mask_spans(text: str, spans: list[tuple[int, int]]) -> str:
@@ -628,6 +708,20 @@ def extract_quarterly_section_candidates(text: str) -> dict[str, RiskExtraction]
             'risk_factors',
             [_ITEM_RE],
         )
+    if not risk or len(risk) < TENQ_MIN_BODY_LEN or _is_quarterly_toc_slice(risk):
+        risk, risk_start, risk_end = _best_global_item_candidate(
+            text,
+            search_text,
+            _TENQ_STANDALONE_RISK_RE,
+            'risk_factors',
+            [
+                _TENQ_MARKET_RISK_RE,
+                _TENQ_CONTROLS_RE,
+                _TENQ_ISSUER_PURCHASES_RE,
+                _ITEM_RE,
+                _TENQ_PART_II_RE,
+            ],
+        )
     if not mda or len(mda) < TENQ_MIN_BODY_LEN or _is_quarterly_toc_slice(mda):
         mda, mda_start, mda_end = _best_global_item_candidate(
             text,
@@ -635,6 +729,20 @@ def extract_quarterly_section_candidates(text: str) -> dict[str, RiskExtraction]
             _TENQ_MDA_RE,
             'mda',
             [_TENQ_ITEM3_4_RE, _TENQ_PART_II_RE],
+        )
+    if not mda or len(mda) < TENQ_MIN_BODY_LEN or _is_quarterly_toc_slice(mda):
+        mda, mda_start, mda_end = _best_global_item_candidate(
+            text,
+            search_text,
+            _TENQ_STANDALONE_MDA_RE,
+            'mda',
+            [
+                _TENQ_RISK_AND_OTHER_RE,
+                _TENQ_MARKET_RISK_RE,
+                _TENQ_CONTROLS_RE,
+                _TENQ_ITEM3_4_RE,
+                _TENQ_PART_II_RE,
+            ],
         )
     candidate_lengths = {'risk_factors': len(risk), 'mda': len(mda)}
     return {
@@ -716,13 +824,10 @@ def extract_risk_section_detail(text: str, form: str = '10-K') -> RiskExtraction
         return mda_detail
 
     if form_key == '20-F':
-        end_markers = _20F_END_MARKERS
         start_patterns = _20F_START_PATTERNS
     else:
-        end_markers = _10K_END_MARKERS
         start_patterns = _10K_START_PATTERNS
 
-    low = text.lower()
     starts = _find_starts(text, start_patterns)
     best = ''
     best_score = -1_000_000.0
@@ -730,9 +835,7 @@ def extract_risk_section_detail(text: str, form: str = '10-K') -> RiskExtraction
     best_end = 0
 
     for st in starts:
-        ends = [low.find(mk, st + 50) for mk in end_markers]
-        ends = [e for e in ends if e != -1]
-        end = min(ends) if ends else st + RISK_CAP
+        end = _annual_end_pos(text, st, form_key)
         chunk = text[st:end][:RISK_CAP]
         score = _candidate_score(chunk, st, form_key)
         if score > best_score:
