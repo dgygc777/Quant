@@ -38,19 +38,74 @@ def iter_param_grid(grid: dict):
         yield dict(zip(keys, combo))
 
 
+def _equal_weight_benchmark(price: pd.DataFrame | pd.Series) -> pd.Series:
+    """Equal-weight per-day return of whatever names are in ``price``.
+
+    Computed only from the supplied slice, so when called on a train window it
+    introduces no look-ahead — the benchmark sees exactly the same dates/names
+    the strategy saw in-sample.
+    """
+    if isinstance(price, pd.Series):
+        return price.pct_change(fill_method=None)
+    return price.pct_change(fill_method=None).mean(axis=1)
+
+
+def active_information_ratio(returns: pd.Series, benchmark: pd.Series) -> float:
+    """Annualized IR of (strategy - benchmark) active returns, aligned by date."""
+    aligned = pd.concat([
+        pd.Series(returns).rename('s'),
+        pd.Series(benchmark).rename('b'),
+    ], axis=1).dropna()
+    if len(aligned) < 2:
+        return -np.inf
+    active = aligned['s'] - aligned['b']
+    std = float(active.std())
+    mean = float(active.mean())
+    if std <= 1e-15:
+        if mean > 0.0:
+            return np.inf
+        if mean < 0.0:
+            return -np.inf
+        return 0.0
+    return mean / std * np.sqrt(252.0)
+
+
+def selection_objective(returns: pd.Series, price_slice, select: str = 'sharpe') -> float:
+    """Score a candidate's in-sample returns under the chosen selection metric.
+
+    ``select='active_ir'`` ranks by benchmark-relative information ratio using a
+    benchmark derived from the same in-sample slice (no look-ahead). Any other
+    value falls back to the matching key from ``metrics()`` (e.g. 'sharpe').
+    """
+    if select == 'active_ir':
+        benchmark = _equal_weight_benchmark(price_slice)
+        return active_information_ratio(returns, benchmark)
+    return metrics(returns)[select]
+
+
 def optimize_full(strategy_fn, price, param_grid, select='sharpe'):
     """NAIVE baseline: optimize over the ENTIRE history (this is the overfit trap)."""
     best_params, best_metrics, best_score = None, None, -np.inf
     for params in iter_param_grid(param_grid):
-        m = metrics(strategy_fn(price, **params))
-        if m[select] > best_score:
-            best_score, best_params, best_metrics = m[select], params, m
+        r = strategy_fn(price, **params)
+        score = selection_objective(r, price, select)
+        if score > best_score:
+            best_score, best_params, best_metrics = score, params, metrics(r)
     return best_params, best_metrics
 
 
 def walk_forward(strategy_fn, price, param_grid, train=252, test=63,
-                 warmup=40, select='sharpe'):
-    """Rolling walk-forward. Returns folds, stitched OOS returns, and OOS metrics."""
+                 warmup=40, select='sharpe', objective_fn=None):
+    """Rolling walk-forward. Returns folds, stitched OOS returns, and OOS metrics.
+
+    ``select`` controls the in-sample selection objective. The default 'sharpe'
+    preserves historical behavior; 'active_ir' selects parameters by
+    benchmark-relative information ratio computed only on the train window.
+
+    ``objective_fn(returns, price, params) -> float`` optionally overrides the
+    scalar selection score (e.g. active IR minus a turnover penalty). It must
+    use only in-sample data; it is evaluated on the train window exclusively.
+    """
     n = len(price)
     fold_records, oos_chunks = [], []
     pos = train
@@ -59,11 +114,16 @@ def walk_forward(strategy_fn, price, param_grid, train=252, test=63,
         te_lo, te_hi = pos, pos + test               # test  window  [te_lo, te_hi)
 
         # 1) optimize ON TRAIN ONLY (in-sample, allowed to peek)
+        train_slice = price.iloc[tr_lo:tr_hi]
         best_params, best_is, best_score = None, None, -np.inf
         for params in iter_param_grid(param_grid):
-            m = metrics(strategy_fn(price.iloc[tr_lo:tr_hi], **params))
-            if m[select] > best_score:
-                best_score, best_params, best_is = m[select], params, m
+            r_train = strategy_fn(train_slice, **params)
+            if objective_fn is not None:
+                score = objective_fn(returns=r_train, price=train_slice, params=params)
+            else:
+                score = selection_objective(r_train, train_slice, select)
+            if score > best_score:
+                best_score, best_params, best_is = score, params, metrics(r_train)
 
         # 2) apply FIXED best params to TEST (out-of-sample, never peeked).
         #    Feed `warmup` extra prior bars so rolling indicators are valid at
@@ -78,6 +138,8 @@ def walk_forward(strategy_fn, price, param_grid, train=252, test=63,
             'test_end': price.index[te_hi - 1],
             'best_params': best_params,
             'in_sample_sharpe': best_is['sharpe'],
+            'in_sample_score': best_score,
+            'select': select,
             'oos_sharpe': metrics(r_test)['sharpe'],
         })
         pos += test                                   # non-overlapping test windows

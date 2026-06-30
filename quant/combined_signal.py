@@ -328,34 +328,25 @@ def _rebalance_days(n: int, rebalance: int) -> set[int]:
     return set(range(0, n, rebalance))
 
 
-def backtest_combined_long_only(
+def combined_long_only_weights(
     panel: pd.DataFrame,
-    xs_params: dict,
+    xs_w: pd.DataFrame,
+    z_panel: pd.DataFrame,
+    mr_panel: pd.DataFrame,
+    mom_panel: pd.DataFrame,
     combined: CombinedParams,
-    cost: float = 0.0005,
-) -> tuple[pd.DataFrame, dict]:
-    """
-    Long-only strategy: equal-weight only names with Final action == BUY each rebalance.
-    """
-    rets = panel.pct_change(fill_method=None)
-    scores = compute_scores(panel, mode=xs_params.get('mode', 'momentum'),
-                            lookback=xs_params.get('lookback', 126),
-                            skip=xs_params.get('skip', 21),
-                            short_window=xs_params.get('short_window', 5))
-    xs_w = build_weights(
-        panel, scores,
-        top_frac=xs_params.get('top_frac', 0.25),
-        rebalance=xs_params.get('rebalance', 5),
-        market_neutral=True,
-    )
-    mom_kw = {k: xs_params[k] for k in ('lookback', 'skip') if k in xs_params}
-    z_panel, mr_panel, mom_panel = precompute_single_stock_signals(panel, mom_params=mom_kw)
+    rebalance: int,
+) -> tuple[pd.DataFrame, list[int]]:
+    """Equal-weight the names whose combined Final action == BUY at each rebalance.
 
+    All inputs are point-in-time panels (signal at day t uses data <= t). Weights
+    are applied to next-day returns by the caller via ``portfolio_returns`` shift,
+    so there is no look-ahead.
+    """
     weights = pd.DataFrame(0.0, index=panel.index, columns=panel.columns)
     last_w = pd.Series(0.0, index=panel.columns)
-    rebals = _rebalance_days(len(panel), xs_params.get('rebalance', 5))
-    holdings_count = []
-
+    rebals = _rebalance_days(len(panel), rebalance)
+    holdings_count: list[int] = []
     for t in range(len(panel)):
         if t in rebals:
             buys = []
@@ -373,6 +364,50 @@ def backtest_combined_long_only(
             last_w = w
             holdings_count.append(len(buys))
         weights.iloc[t] = last_w
+    return weights, holdings_count
+
+
+def backtest_combined_long_only(
+    panel: pd.DataFrame,
+    xs_params: dict,
+    combined: CombinedParams,
+    cost: float = 0.0005,
+    *,
+    precomputed: tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame] | None = None,
+    xs_weights: pd.DataFrame | None = None,
+) -> tuple[pd.DataFrame, dict]:
+    """
+    Long-only strategy: equal-weight only names with Final action == BUY each rebalance.
+
+    ``precomputed`` (z/mr/mom panels) and ``xs_weights`` may be supplied to avoid
+    recomputing single-stock indicators and XS leg classification — important for
+    walk-forward validation, where the same panels are reused across the grid.
+    """
+    rets = panel.pct_change(fill_method=None)
+    rebalance = xs_params.get('rebalance', 5)
+    if xs_weights is None:
+        scores = compute_scores(
+            panel, mode=xs_params.get('mode', 'momentum'),
+            lookback=xs_params.get('lookback', 126),
+            skip=xs_params.get('skip', 21),
+            short_window=xs_params.get('short_window', 5),
+            score_mode=xs_params.get('score_mode', 'raw_momentum'),
+            beta_window=xs_params.get('beta_window', 126),
+        )
+        xs_weights = build_weights(
+            panel, scores,
+            top_frac=xs_params.get('top_frac', 0.25),
+            rebalance=rebalance,
+            market_neutral=True,
+        )
+    if precomputed is None:
+        mom_kw = {k: xs_params[k] for k in ('lookback', 'skip') if k in xs_params}
+        precomputed = precompute_single_stock_signals(panel, mom_params=mom_kw)
+    z_panel, mr_panel, mom_panel = precomputed
+
+    weights, holdings_count = combined_long_only_weights(
+        panel, xs_weights, z_panel, mr_panel, mom_panel, combined, rebalance,
+    )
 
     result = portfolio_returns(weights, rets, cost)
     stats = {

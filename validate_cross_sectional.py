@@ -37,10 +37,30 @@ from quant.data_quality import (
     format_coverage as _format_coverage,
 )
 from quant.metrics import metrics
-from quant.models.cross_sectional import CrossSectionalModel, DEFAULT_XS_COST, backtest_xs
+from quant.models.cross_sectional import (
+    CrossSectionalModel,
+    DEFAULT_BETA_WINDOW,
+    DEFAULT_SCORE_MODE,
+    DEFAULT_XS_COST,
+    SCORE_MODES,
+    backtest_xs,
+    build_weights,
+    compute_scores,
+    portfolio_returns,
+)
+from quant.combined_signal import (
+    CombinedParams,
+    combined_long_only_weights,
+    precompute_single_stock_signals,
+)
 from quant.risk_model import WEIGHTING_METHODS
 from quant.universes import DEFAULT_PRESET, get_universe
-from quant.validation import iter_param_grid, optimize_full, walk_forward
+from quant.validation import (
+    iter_param_grid,
+    optimize_full,
+    selection_objective,
+    walk_forward,
+)
 
 BOOK_CHOICES = ('long_only', 'long_short')
 MIN_VALIDATION_NAMES = 4
@@ -89,11 +109,31 @@ def make_xs_strategy(
     book: str = 'long_only',
     weighting: str = 'equal',
     cost: float | pd.Series = DEFAULT_XS_COST,
+    score_mode: str = DEFAULT_SCORE_MODE,
+    beta_window: int = DEFAULT_BETA_WINDOW,
+    hysteresis: dict | None = None,
+    group_neutral: dict | None = None,
 ):
-    """backtest_xs returns (DataFrame, n_rebalances); strategy returns are strat_net."""
+    """backtest_xs returns (DataFrame, n_rebalances); strategy returns are strat_net.
+
+    ``score_mode``/``beta_window`` select the cross-sectional scoring rule (raw
+    vs benchmark-relative vs residual momentum). ``hysteresis`` (if given) is a
+    dict of build_weights turnover-control kwargs. ``group_neutral`` (if given)
+    is a dict of peer-group construction kwargs (group_neutral/group_map/
+    group_top_frac). All are fixed model choices, not tuned grid params; per-call
+    grid kwargs still win if explicitly passed.
+    """
     market_neutral = book_market_neutral(book)
+    hysteresis = hysteresis or {}
+    group_neutral = group_neutral or {}
 
     def _strategy(panel, **kw):
+        kw.setdefault('score_mode', score_mode)
+        kw.setdefault('beta_window', beta_window)
+        for key, value in hysteresis.items():
+            kw.setdefault(key, value)
+        for key, value in group_neutral.items():
+            kw.setdefault(key, value)
         return backtest_xs(
             panel,
             mode='momentum',
@@ -104,6 +144,39 @@ def make_xs_strategy(
         )[0]['strat_net']
 
     return _strategy
+
+
+def group_neutral_kwargs(
+    use_group_neutral: bool = False,
+    group_map: dict | None = None,
+    group_top_frac: float | None = None,
+) -> dict:
+    """Bundle build_weights peer-group kwargs (empty when disabled)."""
+    if not use_group_neutral:
+        return {}
+    if not group_map:
+        raise ValueError('group-neutral construction requires a non-empty group_map.')
+    out = {'group_neutral': True, 'group_map': group_map}
+    if group_top_frac is not None:
+        out['group_top_frac'] = float(group_top_frac)
+    return out
+
+
+def hysteresis_kwargs(
+    use_hysteresis: bool = False,
+    entry_rank_pct: float = 0.80,
+    exit_rank_pct: float = 0.60,
+    max_new_names_per_rebalance: int | None = None,
+) -> dict:
+    """Bundle build_weights turnover-control kwargs (empty when disabled)."""
+    if not use_hysteresis:
+        return {}
+    return {
+        'use_hysteresis': True,
+        'entry_rank_pct': float(entry_rank_pct),
+        'exit_rank_pct': float(exit_rank_pct),
+        'max_new_names_per_rebalance': max_new_names_per_rebalance,
+    }
 
 
 def xs_strat(panel, **kw):
@@ -462,17 +535,77 @@ def report_panel_validation(
     ci_n_boot: int = IR_CI_BOOT,
     ci_alpha: float = IR_CI_ALPHA,
     ci_seed: int = IR_CI_SEED,
+    select: str = 'sharpe',
+    score_mode: str = DEFAULT_SCORE_MODE,
+    beta_window: int = DEFAULT_BETA_WINDOW,
+    hysteresis: dict | None = None,
+    turnover_penalty: float = 0.0,
+    group_neutral: dict | None = None,
     **wf_kwargs,
 ) -> dict:
     """Panel walk-forward report — same three rows as quant.validation.report_validation."""
-    strategy_fn = make_xs_strategy(book, cost=cost)
+    hysteresis = hysteresis or {}
+    group_neutral = group_neutral or {}
+    strategy_fn = make_xs_strategy(
+        book, cost=cost, score_mode=score_mode, beta_window=beta_window,
+        hysteresis=hysteresis, group_neutral=group_neutral,
+    )
     print(f'\nValidating: {book_description(book)}')
     print(
         f'Validation data context: names={panel.shape[1]} rows={len(panel)} '
         f'folds={fold_count(len(panel), wf_kwargs["train"], wf_kwargs["test"])}'
     )
-    _, full_m = optimize_full(strategy_fn, panel, param_grid)
-    wf = walk_forward(strategy_fn, panel, param_grid, **wf_kwargs)
+    if score_mode != DEFAULT_SCORE_MODE:
+        print(f'Score mode: {score_mode}' + (f' (beta_window={beta_window})'
+                                             if score_mode == 'residual_momentum' else ''))
+    if select != 'sharpe':
+        print(f'Parameter selection objective: {select} (benchmark-relative)')
+    if hysteresis:
+        print(
+            f"Rank hysteresis ON: entry>={hysteresis['entry_rank_pct']:.0%} "
+            f"exit<{hysteresis['exit_rank_pct']:.0%}"
+            + (f", max_new/rebal={hysteresis['max_new_names_per_rebalance']}"
+               if hysteresis.get('max_new_names_per_rebalance') is not None else '')
+        )
+    if turnover_penalty:
+        print(f'Turnover-penalized selection: objective = active_IR - {turnover_penalty:g} * avg_turnover')
+    if group_neutral.get('group_neutral'):
+        from quant.universes import groups_to_members
+        group_map = group_neutral.get('group_map', {})
+        members = groups_to_members({
+            t: g for t, g in group_map.items() if t in panel.columns
+        })
+        gtf = group_neutral.get('group_top_frac')
+        gtf_txt = f', group_top_frac={gtf:.0%}' if gtf is not None else ''
+        print(f'Peer-group-neutral construction ON ({len(members)} groups{gtf_txt}):')
+        for grp in sorted(members):
+            print(f"  {grp:18} {', '.join(members[grp])}")
+        try:
+            first_combo = next(iter(iter_param_grid(param_grid)))
+            current_book = CrossSectionalModel().current_weights(
+                panel, mode='momentum', market_neutral=False,
+                score_mode=score_mode, beta_window=beta_window,
+                **group_neutral, **first_combo,
+            )
+            held = groups_to_members({
+                t: group_map.get(t, 'broad_semis') for t in current_book.index
+            })
+            print(f'Current group-neutral book ({panel.index[-1].date()}):')
+            for grp in sorted(held):
+                names = ', '.join(
+                    f'{t} {current_book[t]:.0%}' for t in held[grp]
+                )
+                print(f"  {grp:18} {names}")
+        except (ValueError, StopIteration):
+            print('  (current book unavailable — too few scored names)')
+    objective_fn = None
+    if turnover_penalty and turnover_penalty > 0.0:
+        objective_fn = _turnover_penalized_objective(
+            cost, score_mode, beta_window, hysteresis, turnover_penalty,
+        )
+    _, full_m = optimize_full(strategy_fn, panel, param_grid, select=select)
+    wf = walk_forward(strategy_fn, panel, param_grid, select=select,
+                      objective_fn=objective_fn, **wf_kwargs)
     oos = wf['oos_metrics']
     benchmark_oos_returns = equal_weight_oos_returns(panel, wf['oos_returns'].index)
     benchmark_oos = metrics(benchmark_oos_returns)
@@ -565,6 +698,29 @@ def report_panel_validation(
     print(f'Validation verdict: {verdict} - {verdict_reason}')
     print(f'Folds: {len(wf["folds"])}')
 
+    if book == 'long_only' and (hysteresis or turnover_penalty):
+        to_wf = walk_forward_long_only_with_turnover(
+            panel,
+            param_grid,
+            cost=cost,
+            train=wf_kwargs['train'],
+            test=wf_kwargs['test'],
+            warmup=wf_kwargs.get('warmup', WARMUP),
+            select=select,
+            score_mode=score_mode,
+            beta_window=beta_window,
+            hysteresis=hysteresis,
+            turnover_penalty=turnover_penalty,
+        )
+        mean_turnover = float(to_wf['turnover'].mean()) if len(to_wf['turnover']) else 0.0
+        mean_cost = float(to_wf['cost_paid'].mean()) if len(to_wf['cost_paid']) else 0.0
+        wf['oos_mean_turnover'] = mean_turnover
+        wf['oos_mean_cost_drag'] = mean_cost
+        print(
+            f'OOS mean per-day turnover: {mean_turnover:.4f}   '
+            f'mean daily cost drag: {mean_cost:.5f}'
+        )
+
     if show_fold_ranks:
         print_oos_fold_ranks(
             panel, param_grid,
@@ -649,6 +805,30 @@ def compare_weighting_validation(
     }
 
 
+def _turnover_penalized_objective(cost, score_mode, beta_window, hysteresis, turnover_penalty):
+    """In-sample objective = active IR - turnover_penalty * mean per-day turnover.
+
+    Uses only the train slice passed in (no look-ahead): the benchmark and the
+    turnover both come from that slice's own backtest.
+    """
+    hysteresis = hysteresis or {}
+
+    def _obj(returns, price, params):
+        kw = {'score_mode': score_mode, 'beta_window': beta_window, **hysteresis, **params}
+        df, _ = backtest_xs(
+            price, mode='momentum', market_neutral=False, cost=cost, **kw,
+        )
+        bench = price.pct_change(fill_method=None).mean(axis=1)
+        active = active_oos_returns(df['strat_net'], bench)
+        ir = information_ratio(active)
+        avg_turnover = float(df['turnover'].mean()) if len(df) else 0.0
+        if not np.isfinite(ir):
+            return ir
+        return ir - float(turnover_penalty) * avg_turnover
+
+    return _obj
+
+
 def walk_forward_long_only_with_turnover(
     panel: pd.DataFrame,
     param_grid: dict,
@@ -658,11 +838,24 @@ def walk_forward_long_only_with_turnover(
     test: int = 63,
     warmup: int = WARMUP,
     select: str = 'sharpe',
+    score_mode: str = DEFAULT_SCORE_MODE,
+    beta_window: int = DEFAULT_BETA_WINDOW,
+    hysteresis: dict | None = None,
+    turnover_penalty: float = 0.0,
     fixed_folds: list[dict] | None = None,
 ) -> dict:
     """Canonical long-only walk-forward plus fold-matched OOS turnover."""
+    hysteresis = hysteresis or {}
     if fixed_folds is None:
-        strategy_fn = make_xs_strategy('long_only', cost=cost)
+        strategy_fn = make_xs_strategy(
+            'long_only', cost=cost, score_mode=score_mode, beta_window=beta_window,
+            hysteresis=hysteresis,
+        )
+        objective_fn = None
+        if turnover_penalty and turnover_penalty > 0.0:
+            objective_fn = _turnover_penalized_objective(
+                cost, score_mode, beta_window, hysteresis, turnover_penalty,
+            )
         base_wf = walk_forward(
             strategy_fn,
             panel,
@@ -671,6 +864,7 @@ def walk_forward_long_only_with_turnover(
             test=test,
             warmup=warmup,
             select=select,
+            objective_fn=objective_fn,
         )
         folds = base_wf['folds']
     else:
@@ -683,12 +877,17 @@ def walk_forward_long_only_with_turnover(
         if te_hi > len(panel):
             break
         wlo = max(0, te_lo - warmup)
+        replay_kw = dict(fold['best_params'])
+        replay_kw.setdefault('score_mode', score_mode)
+        replay_kw.setdefault('beta_window', beta_window)
+        for key, value in hysteresis.items():
+            replay_kw.setdefault(key, value)
         df_full, _ = backtest_xs(
             panel.iloc[wlo:te_hi],
             mode='momentum',
             market_neutral=False,
             cost=cost,
-            **fold['best_params'],
+            **replay_kw,
         )
         test_index = panel.index[te_lo:te_hi]
         oos = df_full['strat_net'].reindex(test_index).dropna()
@@ -710,6 +909,305 @@ def walk_forward_long_only_with_turnover(
         'turnover': turnover,
         'cost_paid': cost_paid,
         'folds': replayed_folds,
+    }
+
+
+COMBINED_GRID = {
+    'z_overextended': [1.0, 1.5, 2.0],
+    'z_oversold': [-0.5, -1.0, -1.5],
+    'require_momentum_buy': [True, False],
+    'score_mode': ['raw_momentum', 'relative_momentum', 'residual_momentum'],
+}
+
+
+def _xs_single_combo_grid(xs_params: dict) -> dict:
+    """One-combo grid (lists of length 1) of the fixed XS preset params."""
+    keys = ('lookback', 'skip', 'top_frac', 'rebalance')
+    return {k: [xs_params[k]] for k in keys if k in xs_params}
+
+
+def _precompute_combined_panels(
+    panel: pd.DataFrame, xs_params: dict, score_modes: list[str], beta_window: int,
+):
+    """Compute single-stock signal panels + per-score-mode XS leg weights once.
+
+    Every panel here is point-in-time (rolling/shifted, backward-looking only),
+    so slicing them to any window in the fold loop introduces no look-ahead.
+    Reusing them across the grid is what makes combined walk-forward tractable.
+    """
+    lookback = xs_params.get('lookback', 126)
+    skip = xs_params.get('skip', 21)
+    top_frac = xs_params.get('top_frac', 0.25)
+    rebalance = xs_params.get('rebalance', 5)
+    precomputed = precompute_single_stock_signals(
+        panel, mom_params={'lookback': lookback, 'skip': skip},
+    )
+    xs_w_by_mode = {}
+    for sm in score_modes:
+        scores = compute_scores(
+            panel, mode='momentum', lookback=lookback, skip=skip,
+            score_mode=sm, beta_window=beta_window,
+        )
+        xs_w_by_mode[sm] = build_weights(
+            panel, scores, top_frac=top_frac, rebalance=rebalance, market_neutral=True,
+        )
+    return precomputed, xs_w_by_mode
+
+
+def _combined_combo_returns(
+    panel: pd.DataFrame, combo: dict, xs_w_by_mode: dict, precomputed, rebalance: int,
+    cost: float | pd.Series,
+) -> pd.Series:
+    """Net daily returns of the combined long-only book for one grid combo."""
+    combined = CombinedParams(
+        z_overextended=float(combo['z_overextended']),
+        z_oversold=float(combo['z_oversold']),
+        require_momentum_buy=bool(combo['require_momentum_buy']),
+        long_only_mode=True,
+    )
+    z_panel, mr_panel, mom_panel = precomputed
+    xs_w = xs_w_by_mode[combo['score_mode']]
+    weights, _ = combined_long_only_weights(
+        panel, xs_w, z_panel, mr_panel, mom_panel, combined, rebalance,
+    )
+    rets = panel.pct_change(fill_method=None)
+    return portfolio_returns(weights, rets, cost)['strat_net']
+
+
+def walk_forward_combined_long_only(
+    panel: pd.DataFrame,
+    xs_params: dict,
+    *,
+    cost: float | pd.Series = DEFAULT_XS_COST,
+    train: int = 252,
+    test: int = 63,
+    warmup: int = WARMUP,
+    combined_grid: dict | None = None,
+    beta_window: int = DEFAULT_BETA_WINDOW,
+    select: str = 'active_ir',
+) -> dict:
+    """Walk-forward the combined long-only book, tuning combined params per fold.
+
+    Single-stock signals and per-score-mode XS leg weights are precomputed once
+    on the full panel (point-in-time), then sliced per fold. Parameters are
+    chosen on the train window only (default objective: active IR vs the
+    in-sample equal-weight benchmark), then applied to the next test window.
+    """
+    combined_grid = combined_grid or COMBINED_GRID
+    score_modes = list(dict.fromkeys(combined_grid.get('score_mode', [DEFAULT_SCORE_MODE])))
+    rebalance = xs_params.get('rebalance', 5)
+    precomputed, xs_w_by_mode = _precompute_combined_panels(
+        panel, xs_params, score_modes, beta_window,
+    )
+    combos = list(iter_param_grid(combined_grid))
+    combo_returns = [
+        _combined_combo_returns(panel, c, xs_w_by_mode, precomputed, rebalance, cost)
+        for c in combos
+    ]
+
+    n = len(panel)
+    pos = train
+    oos_chunks: list[pd.Series] = []
+    folds: list[dict] = []
+    while pos + test <= n:
+        tr_lo, tr_hi = pos - train, pos
+        te_lo, te_hi = pos, pos + test
+        train_idx = panel.index[tr_lo:tr_hi]
+        test_idx = panel.index[te_lo:te_hi]
+        train_price = panel.iloc[tr_lo:tr_hi]
+
+        best_score, best_combo, best_idx, best_is_sharpe = -np.inf, None, None, float('nan')
+        for i, (combo, r) in enumerate(zip(combos, combo_returns)):
+            r_tr = r.reindex(train_idx).dropna()
+            if len(r_tr) < 2:
+                continue
+            score = selection_objective(r_tr, train_price, select)
+            if score > best_score:
+                best_score, best_combo, best_idx = score, combo, i
+                best_is_sharpe = metrics(r_tr)['sharpe']
+        if best_idx is None:
+            pos += test
+            continue
+        r_test = combo_returns[best_idx].reindex(test_idx).dropna()
+        oos_chunks.append(r_test)
+        folds.append({
+            'train_end': panel.index[tr_hi - 1],
+            'test_end': panel.index[te_hi - 1],
+            'best_params': best_combo,
+            'in_sample_sharpe': best_is_sharpe,
+            'in_sample_score': best_score,
+            'oos_sharpe': metrics(r_test)['sharpe'] if len(r_test) else float('nan'),
+            'select': select,
+        })
+        pos += test
+
+    oos_returns = pd.concat(oos_chunks).sort_index() if oos_chunks else pd.Series(dtype=float)
+    return {
+        'oos_returns': oos_returns,
+        'oos_metrics': metrics(oos_returns),
+        'folds': folds,
+        'n_combos': len(combos),
+    }
+
+
+def _active_oos_summary(
+    oos_returns: pd.Series,
+    panel: pd.DataFrame,
+    folds: int,
+    n_trials: int,
+    ci_block: int = IR_CI_BLOCK,
+    ci_n_boot: int = IR_CI_BOOT,
+    ci_alpha: float = IR_CI_ALPHA,
+    ci_seed: int = IR_CI_SEED,
+) -> dict:
+    """Benchmark-relative OOS summary (Sharpe, active IR + CI, verdict)."""
+    oos = metrics(oos_returns)
+    bench_returns = equal_weight_oos_returns(panel, oos_returns.index)
+    bench = metrics(bench_returns)
+    active = active_oos_returns(oos_returns, bench_returns)
+    active_ir, ci_lower, ci_upper, ir_se = information_ratio_ci(
+        active, block=ci_block, n_boot=ci_n_boot, alpha=ci_alpha, seed=ci_seed,
+    )
+    selection_bar = expected_max_ir_under_null(n_trials, ir_se)
+    verdict = validation_verdict(
+        oos['sharpe'], active_ir, folds,
+        ci_lower=ci_lower, ci_upper=ci_upper, selection_threshold=selection_bar,
+    )
+    reason = validation_verdict_reason(
+        oos['sharpe'], active_ir, folds,
+        ci_lower=ci_lower, ci_upper=ci_upper, selection_threshold=selection_bar,
+    )
+    aligned = pd.concat([
+        oos_returns.rename('s'), bench_returns.rename('b'),
+    ], axis=1).dropna()
+    corr = float(aligned['s'].corr(aligned['b'])) if len(aligned) >= 2 else float('nan')
+    return {
+        'oos_metrics': oos,
+        'benchmark_metrics': bench,
+        'active_ir': active_ir,
+        'ci_lower': ci_lower,
+        'ci_upper': ci_upper,
+        'ir_se': ir_se,
+        'selection_bar': selection_bar,
+        'verdict': verdict,
+        'verdict_reason': reason,
+        'benchmark_correlation': corr,
+    }
+
+
+def report_combined_validation(
+    panel: pd.DataFrame,
+    xs_params: dict,
+    *,
+    cost: float | pd.Series = DEFAULT_XS_COST,
+    train: int = 252,
+    test: int = 63,
+    warmup: int = WARMUP,
+    combined_grid: dict | None = None,
+    beta_window: int = DEFAULT_BETA_WINDOW,
+    select: str = 'active_ir',
+    ci_block: int = IR_CI_BLOCK,
+    ci_n_boot: int = IR_CI_BOOT,
+    ci_alpha: float = IR_CI_ALPHA,
+    ci_seed: int = IR_CI_SEED,
+) -> dict:
+    """OOS active-IR report for the combined long-only book vs pure XS + benchmark.
+
+    Both books are walk-forward validated on the same panel/folds with the same
+    selection objective; the benchmark is the equal-weight universe on the same
+    OOS dates. The combined book is only credited with EDGE if it clears the same
+    benchmark-relative gates as the pure XS book — never on absolute return alone.
+    """
+    combined_grid = combined_grid or COMBINED_GRID
+    n_combos = 1
+    for values in combined_grid.values():
+        n_combos *= max(1, len(values))
+
+    print('\n=== Combined-signal walk-forward validation (long-only) ===')
+    print(
+        'XS rank + single-stock z-score / momentum confirmation + filing overlay. '
+        'Tuned combined params per fold on the train window only.'
+    )
+    print(
+        f"Combined grid: z_overextended={combined_grid.get('z_overextended')} "
+        f"z_oversold={combined_grid.get('z_oversold')} "
+        f"require_momentum_buy={combined_grid.get('require_momentum_buy')} "
+        f"score_mode={combined_grid.get('score_mode')}  ->  {n_combos} combos/fold"
+    )
+    if select != 'sharpe':
+        print(f'Parameter selection objective: {select} (benchmark-relative)')
+
+    combined_wf = walk_forward_combined_long_only(
+        panel, xs_params, cost=cost, train=train, test=test, warmup=warmup,
+        combined_grid=combined_grid, beta_window=beta_window, select=select,
+    )
+    xs_strategy = make_xs_strategy(
+        'long_only', cost=cost,
+        score_mode=xs_params.get('score_mode', DEFAULT_SCORE_MODE),
+        beta_window=beta_window,
+    )
+    xs_wf = walk_forward(
+        xs_strategy, panel, _xs_single_combo_grid(xs_params),
+        train=train, test=test, warmup=warmup, select=select,
+    )
+
+    combined_folds = len(combined_wf['folds'])
+    xs_folds = len(xs_wf['folds'])
+    combined_sum = _active_oos_summary(
+        combined_wf['oos_returns'], panel, combined_folds, n_combos,
+        ci_block=ci_block, ci_n_boot=ci_n_boot, ci_alpha=ci_alpha, ci_seed=ci_seed,
+    )
+    xs_sum = _active_oos_summary(
+        xs_wf['oos_returns'], panel, xs_folds, 1,
+        ci_block=ci_block, ci_n_boot=ci_n_boot, ci_alpha=ci_alpha, ci_seed=ci_seed,
+    )
+    benchmark = combined_sum['benchmark_metrics']
+
+    print(f"\n{'Book':32}{'OOS Sharpe':>11}{'AnnRet':>9}{'MaxDD':>9}{'ActiveIR':>10}")
+    xs_m = xs_sum['oos_metrics']
+    cm = combined_sum['oos_metrics']
+    print(f"{'Pure XS long-only':32}{xs_m['sharpe']:>11.2f}"
+          f"{xs_m['ann_return']:>9.1%}{xs_m['max_dd']:>9.1%}"
+          f"{_format_signed(xs_sum['active_ir']):>10}")
+    print(f"{'Combined long-only':32}{cm['sharpe']:>11.2f}"
+          f"{cm['ann_return']:>9.1%}{cm['max_dd']:>9.1%}"
+          f"{_format_signed(combined_sum['active_ir']):>10}")
+    print(f"{'Equal-weight benchmark':32}{benchmark['sharpe']:>11.2f}"
+          f"{benchmark['ann_return']:>9.1%}{benchmark['max_dd']:>9.1%}"
+          f"{'—':>10}   <- same OOS folds")
+
+    confidence = int(round((1.0 - ci_alpha) * 100))
+    ci_lower, ci_upper = combined_sum['ci_lower'], combined_sum['ci_upper']
+    if not pd.isna(ci_lower) and not pd.isna(ci_upper) and np.isfinite(ci_lower) and np.isfinite(ci_upper):
+        ci_text = f'{_format_signed(ci_lower)}, {_format_signed(ci_upper)}'
+    else:
+        ci_text = 'unavailable - too few OOS active-return points'
+    print(
+        f"\nCombined active IR: {_format_signed(combined_sum['active_ir'])}  "
+        f'[{confidence}% CI: {ci_text}]  (block-bootstrap, seed={ci_seed})'
+    )
+    print(
+        f'Selection-adjusted bar (N={n_combos} combos): '
+        f"expected max IR under null ≈ {_format_signed(combined_sum['selection_bar'])}"
+    )
+    corr = combined_sum['benchmark_correlation']
+    corr_note = '   <- active return is a thin residual; IR is low-power' if (
+        not pd.isna(corr) and corr > 0.90) else ''
+    print(f'Combined benchmark correlation: {_format_signed(corr)}{corr_note}')
+    print(f"Combined verdict: {combined_sum['verdict']} - {combined_sum['verdict_reason']}")
+    print(f'Folds: combined={combined_folds}  pure-XS={xs_folds}')
+    print(
+        '\nNote: the combined overlay only adds edge if it beats BOTH the pure XS '
+        'book and the equal-weight benchmark OOS after costs; gating/confirmation '
+        'usually trades breadth for lower turnover, not for higher active IR.'
+    )
+
+    return {
+        'combined_wf': combined_wf,
+        'combined_summary': combined_sum,
+        'xs_wf': xs_wf,
+        'xs_summary': xs_sum,
+        'n_combos': n_combos,
     }
 
 
@@ -773,6 +1271,10 @@ def transaction_cost_sensitivity(
     ci_n_boot: int = IR_CI_BOOT,
     ci_alpha: float = IR_CI_ALPHA,
     ci_seed: int = IR_CI_SEED,
+    score_mode: str = DEFAULT_SCORE_MODE,
+    beta_window: int = DEFAULT_BETA_WINDOW,
+    hysteresis: dict | None = None,
+    turnover_penalty: float = 0.0,
     **wf_kwargs,
 ) -> dict:
     """Sweep costs on one fixed walk-forward book and benchmark cost model."""
@@ -784,6 +1286,10 @@ def transaction_cost_sensitivity(
         panel,
         param_grid,
         cost=selection_cost,
+        score_mode=score_mode,
+        beta_window=beta_window,
+        hysteresis=hysteresis,
+        turnover_penalty=turnover_penalty,
         **wf_kwargs,
     )
     rows = []
@@ -796,6 +1302,10 @@ def transaction_cost_sensitivity(
                 panel,
                 param_grid,
                 cost=cost,
+                score_mode=score_mode,
+                beta_window=beta_window,
+                hysteresis=hysteresis,
+                turnover_penalty=turnover_penalty,
                 fixed_folds=selection_wf['folds'],
                 **wf_kwargs,
             )
@@ -980,6 +1490,40 @@ def main() -> None:
         '--show-fold-ranks', action='store_true',
         help='Print long/short legs at test start/end for each walk-forward fold',
     )
+    parser.add_argument(
+        '--score-mode',
+        choices=list(SCORE_MODES),
+        default=DEFAULT_SCORE_MODE,
+        help=f'Cross-sectional scoring rule (default: {DEFAULT_SCORE_MODE})',
+    )
+    parser.add_argument(
+        '--beta-window', type=int, default=DEFAULT_BETA_WINDOW,
+        help=f'Rolling beta window for residual_momentum (default: {DEFAULT_BETA_WINDOW})',
+    )
+    parser.add_argument(
+        '--select', choices=['sharpe', 'active_ir'], default='sharpe',
+        help='Parameter selection objective on the train window (default: sharpe)',
+    )
+    parser.add_argument(
+        '--use-hysteresis', action='store_true',
+        help='Enable rank hysteresis (entry/exit bands) to reduce long-leg turnover',
+    )
+    parser.add_argument(
+        '--entry-rank-pct', type=float, default=0.80,
+        help='Hysteresis: enter a long when rank percentile >= this (default 0.80)',
+    )
+    parser.add_argument(
+        '--exit-rank-pct', type=float, default=0.60,
+        help='Hysteresis: hold a long until rank percentile < this (default 0.60)',
+    )
+    parser.add_argument(
+        '--max-new-names-per-rebalance', type=int, default=None,
+        help='Hysteresis: cap new long entries per rebalance (default: no cap)',
+    )
+    parser.add_argument(
+        '--turnover-penalty', type=float, default=0.0,
+        help='Selection objective = active_IR - penalty * avg_turnover (default 0)',
+    )
     args = parser.parse_args()
 
     warmup = args.warmup if args.warmup is not None else WARMUP
@@ -1036,6 +1580,16 @@ def main() -> None:
         show_fold_ranks=args.show_fold_ranks,
         book=args.book,
         n_trials=args.n_trials,
+        select=args.select,
+        score_mode=args.score_mode,
+        beta_window=args.beta_window,
+        hysteresis=hysteresis_kwargs(
+            use_hysteresis=args.use_hysteresis,
+            entry_rank_pct=args.entry_rank_pct,
+            exit_rank_pct=args.exit_rank_pct,
+            max_new_names_per_rebalance=args.max_new_names_per_rebalance,
+        ),
+        turnover_penalty=args.turnover_penalty,
         train=args.train,
         test=args.test,
         warmup=warmup,

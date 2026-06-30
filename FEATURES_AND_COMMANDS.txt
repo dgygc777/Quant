@@ -55,6 +55,71 @@ Important:
   - It does not refresh SEC filings or call the LLM by itself.
   - Refresh filing scores separately with tenk_reader.py when needed.
 
+Trend / vol-timing overlay (risk-adjusted timing, judged vs cash):
+
+  python3 cli.py portfolio trend --universe semis --years 12 --trend-mode sma --cost-bps 10
+  python3 cli.py portfolio trend --universe semis --years 12 --trend-mode tsmom --vol-target --target-vol 0.15
+
+  - This is NOT a benchmark-relative strategy. Cross-sectional momentum matches
+    the equal-weight basket; this command instead TIMES EXPOSURE to the basket
+    to improve risk-adjusted return (Sharpe) and cut drawdowns.
+  - --trend-mode sma   : hold the basket when its price is above its N-day moving
+    average, else move to cash (N is walk-forward selected from --trend-windows).
+  - --trend-mode tsmom : hold when the trailing N-day return is positive.
+  - --vol-target scales exposure toward --target-vol using trailing realized vol
+    (de-risks in turbulent regimes; --max-leverage caps exposure, default 1.0x).
+  - --cash-rate sets the annual return earned when out of the market (default 0).
+  - No look-ahead: exposure at day t uses data <= t and is applied to the next
+    day's return; cost is charged on exposure changes.
+  - The report compares the overlay OOS vs the ALWAYS-INVESTED basket and vs cash
+    (Sharpe / AnnRet / Vol / MaxDD), shows % time invested, turnover, cost drag,
+    fold consistency, and a verdict:
+      IMPROVES RISK-ADJUSTED  - higher Sharpe AND no worse drawdown than buy&hold
+      REDUCES DRAWDOWN ONLY   - lower return but materially smaller drawdowns
+      NO IMPROVEMENT          - after costs, timing did not beat holding
+  - Expect trend overlays to shine in bear/crash regimes and to lag in relentless
+    bull markets; on a strong-trending basket they often cut drawdowns without
+    raising Sharpe.
+
+Peer-group-neutral construction (avoid betting on one sub-industry):
+
+  python3 cli.py portfolio compare --universe semis --years 10 --momentum-preset mom_10d --score-mode residual_momentum --group-neutral --cost-bps 10
+
+  - --group-neutral builds a LONG-ONLY book that splits capital EQUALLY across
+    semiconductor peer groups (memory_storage, equipment, foundry, eda_ip,
+    analog_power, ai_connectivity, osat_packaging, broad_semis), then picks the
+    top names WITHIN each group by the chosen score_mode. This stops the book
+    from becoming a concentrated bet on whichever sub-theme is hottest.
+  - --group-top-frac F sets the fraction of names selected within each group
+    (default: same as --top-frac; at least one name per group).
+  - Thin groups (fewer than 2 of the active tickers) are merged into
+    broad_semis so a singleton sub-industry cannot dominate.
+  - The flag implies validation: the report shows the peer-group membership,
+    the current group-neutral book by group, and a walk-forward OOS active-IR
+    verdict for the group-neutral construction (no look-ahead).
+  - Sizing-scheme and cost-sweep self-checks are skipped under --group-neutral
+    because those diagnostics use the plain top-k book, not the group book.
+
+Combined-signal out-of-sample validation:
+
+  python3 cli.py portfolio compare --universe semis --years 10 --momentum-preset mom_10d --cost-bps 10 --validate-combined
+
+  - --validate-combined implies --validate and adds a dedicated walk-forward
+    report for the COMBINED long-only book (XS rank + z-score / momentum
+    confirmation overlay), tuned per fold on the train window only.
+  - It tunes combined params per fold: z_overextended in [1.0, 1.5, 2.0],
+    z_oversold in [-0.5, -1.0, -1.5], require_momentum_buy in [True, False],
+    and score_mode in [raw_momentum, relative_momentum, residual_momentum]
+    (54 combos/fold), selecting on active IR vs the equal-weight benchmark.
+  - Output compares three books on the SAME OOS folds: pure XS long-only,
+    combined long-only, and the equal-weight benchmark (OOS Sharpe, AnnRet,
+    MaxDD, active IR), plus the combined active-IR CI, selection-adjusted null
+    bar, benchmark correlation, and an EDGE / MATCHES BENCHMARK / FAILS verdict.
+  - The combined book is only credited with EDGE if it beats the benchmark
+    OOS after costs and clears the selection-adjusted bar — never on absolute
+    return alone. Gating/confirmation usually trades breadth for lower turnover,
+    not higher active IR.
+
 
 ================================================================================
 2. COMMON PORTFOLIO COMMANDS
@@ -301,6 +366,57 @@ Ranking only:
 Custom basket:
 
   python3 cli.py portfolio compare --tickers AMAT,ASX,COHR,INTC,LRCX,GFS,ARM,AMD,MRVL,ALAB --years 10 --momentum-preset mom_10d --cost-bps 10 --validate
+
+--------------------------------------------------------------------------------
+PHASE 8 — POINT-IN-TIME FILING-RISK FACTOR (portfolio filing)
+--------------------------------------------------------------------------------
+Turns cached 10-K/20-F risk-language change scores (tenk_cache.json) into a
+point-in-time ticker x date panel and uses it as a NEGATIVE filter on the
+long-only book (never as a buy signal).
+
+No look-ahead:
+  - A filing scored on filing_date becomes active on filing_date + 1 trading day
+    (configurable via --filing-activation-lag) and persists until a newer filing
+    for that ticker supersedes it. Dates before the first filing are "no info".
+
+Filter actions (names whose ACTIVE score <= threshold):
+  - exclude     : drop the position, then renormalize the long book (pure tilt).
+  - half_weight : halve the position, then renormalize.
+
+Cadence (annual vs quarterly):
+  10-Ks/20-Fs are ANNUAL -> ~1 score/name/yr, so an annual-only cache needs many
+  years to be testable. tenk_reader.py also scores 10-Q QUARTERLY changes
+  (seasonality-controlled, year-over-year same quarter) -> ~4 scores/name/yr.
+  Both write into the SAME cache (tenk_cache.json) with a `source` field, and
+  the factor ingests both automatically: quarterly scores simply produce more
+  frequent step-changes in the point-in-time panel. The report shows the cadence
+  mix and median update spacing. To densify:
+    python3 tenk_reader.py --tickers <T1,T2,...> --filing-type both
+
+Data-sufficiency gate (the important part):
+  Because updates are infrequent, a thin cache CANNOT validate the factor. The
+  report ALWAYS prints sufficiency first and only runs walk-forward validation
+  when the cache clears the bar (>= 4 names with >= 4 scored updates each, >= 3y
+  span, >= 20 total updates). The gate is cadence-aware: quarterly scoring
+  reaches the per-name update count in far less calendar time than annual.
+  Otherwise it prints "INSUFFICIENT — validation SKIPPED" and explains what
+  backfill is needed. (The current cache is a recent snapshot, so it correctly
+  reports INSUFFICIENT.)
+
+Commands:
+  # Sufficiency check + (if data allows) base-vs-filtered active-IR validation
+  python3 cli.py portfolio filing --universe semis --years 10 \
+      --momentum-preset mom_10d --cost-bps 10
+
+  # Tune the filter
+  python3 cli.py portfolio filing --universe semis --years 10 \
+      --momentum-preset mom_10d --filing-threshold -0.30 \
+      --filing-action half_weight --filing-activation-lag 1 --cost-bps 10
+
+To make it validatable: backfill annual filing-change scores per name across
+many years (EDGAR holds the raw 10-K/20-F filings back decades; tenk_reader.py
+fetches + scores them). Until then the factor is infrastructure-ready but
+under-powered by design.
 
 ================================================================================
 END

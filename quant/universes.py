@@ -126,6 +126,73 @@ UNIVERSE_DESCRIPTIONS: dict[str, str] = {
 }
 
 
+# Canonical semiconductor sub-industry ("peer group") for each ticker. Used by
+# group-neutral construction so the book is not just a bet on the hottest
+# sub-theme. Each ticker maps to exactly one group; unknowns fall back to
+# 'broad_semis' via build_group_map(). Mapping is static (no look-ahead).
+SEMI_PEER_GROUPS: dict[str, str] = {
+    # Memory & storage
+    'MU': 'memory_storage', 'SNDK': 'memory_storage',
+    'WDC': 'memory_storage', 'STX': 'memory_storage',
+    # Wafer-fab equipment / metrology
+    'AMAT': 'equipment', 'LRCX': 'equipment', 'KLAC': 'equipment',
+    'ASML': 'equipment', 'TER': 'equipment', 'ONTO': 'equipment',
+    'KLIC': 'equipment', 'ACLS': 'equipment', 'ENTG': 'equipment',
+    # Foundry / IDM
+    'TSM': 'foundry', 'GFS': 'foundry', 'UMC': 'foundry', 'INTC': 'foundry',
+    # EDA & semiconductor IP
+    'SNPS': 'eda_ip', 'CDNS': 'eda_ip', 'ARM': 'eda_ip',
+    # Analog / mixed-signal / power
+    'TXN': 'analog_power', 'ADI': 'analog_power', 'NXPI': 'analog_power',
+    'MCHP': 'analog_power', 'ON': 'analog_power', 'MPWR': 'analog_power',
+    'STM': 'analog_power',
+    # AI connectivity: networking, optical, high-speed interconnect
+    'AVGO': 'ai_connectivity', 'MRVL': 'ai_connectivity', 'COHR': 'ai_connectivity',
+    'ALAB': 'ai_connectivity', 'CRDO': 'ai_connectivity',
+    # OSAT / packaging
+    'ASX': 'osat_packaging', 'AMKR': 'osat_packaging',
+    # Broad compute / GPU / mobile designers
+    'NVDA': 'broad_semis', 'AMD': 'broad_semis', 'QCOM': 'broad_semis',
+}
+
+DEFAULT_PEER_GROUP = 'broad_semis'
+
+
+def peer_group_of(ticker: str) -> str:
+    """Canonical semiconductor sub-industry for one ticker (fallback group)."""
+    return SEMI_PEER_GROUPS.get(ticker.strip().upper(), DEFAULT_PEER_GROUP)
+
+
+def build_group_map(tickers: list[str], min_group_names: int = 2) -> dict[str, str]:
+    """Map each ticker → peer group, merging thin groups into the fallback group.
+
+    A group represented by fewer than ``min_group_names`` of the supplied
+    tickers is collapsed into ``DEFAULT_PEER_GROUP`` so group-neutral allocation
+    is not dominated by singleton sub-industries. The mapping is static and
+    universe-only (no prices), so it introduces no look-ahead.
+    """
+    if min_group_names < 1:
+        raise ValueError('min_group_names must be >= 1')
+    raw = {t: peer_group_of(t) for t in tickers}
+    counts: dict[str, int] = {}
+    for g in raw.values():
+        counts[g] = counts.get(g, 0) + 1
+    return {
+        t: (g if counts[g] >= min_group_names else DEFAULT_PEER_GROUP)
+        for t, g in raw.items()
+    }
+
+
+def groups_to_members(group_map: dict[str, str]) -> dict[str, list[str]]:
+    """Invert a ticker→group map into group→sorted members."""
+    out: dict[str, list[str]] = {}
+    for ticker, group in group_map.items():
+        out.setdefault(group, []).append(ticker)
+    for members in out.values():
+        members.sort()
+    return out
+
+
 def available_universes() -> list[str]:
     return sorted(UNIVERSE_PRESETS.keys())
 

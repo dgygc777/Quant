@@ -42,7 +42,12 @@ from quant.combined_signal import (
 from quant.data_quality import MIN_COVERAGE, coverage_by_ticker, format_coverage
 from quant.models.cross_sectional import assess_panel_quality, print_panel_quality
 from quant.params import validate_xs_params
-from quant.models.cross_sectional import DEFAULT_TOP_FRAC
+from quant.models.cross_sectional import (
+    DEFAULT_BETA_WINDOW,
+    DEFAULT_SCORE_MODE,
+    DEFAULT_TOP_FRAC,
+    SCORE_MODES,
+)
 from quant.registry import get_model, get_panel_model, list_models, list_panel_models, resolve_models
 from quant.report_builder import build_full_report, cli_usage_block
 from quant.reporting import print_model_comparison, run_model_backtest, run_panel_backtest
@@ -118,6 +123,29 @@ def add_portfolio_params(p: argparse.ArgumentParser) -> None:
                    help='Momentum lookback days (overrides --momentum-preset)')
     p.add_argument('--skip', type=int, default=None,
                    help='Momentum skip days (overrides --momentum-preset)')
+    p.add_argument('--score-mode', choices=list(SCORE_MODES), default=DEFAULT_SCORE_MODE,
+                   help=f'Cross-sectional scoring rule (default: {DEFAULT_SCORE_MODE}). '
+                        'relative_momentum/residual_momentum are benchmark-relative.')
+    p.add_argument('--beta-window', type=int, default=DEFAULT_BETA_WINDOW,
+                   help=f'Rolling beta window for residual_momentum (default {DEFAULT_BETA_WINDOW})')
+    p.add_argument('--select', choices=['sharpe', 'active_ir'], default='sharpe',
+                   help='Walk-forward parameter selection objective (default: sharpe)')
+    p.add_argument('--use-hysteresis', action='store_true',
+                   help='Enable rank hysteresis (entry/exit bands) to cut long-leg turnover')
+    p.add_argument('--entry-rank-pct', type=float, default=0.80,
+                   help='Hysteresis: enter long when rank percentile >= this (default 0.80)')
+    p.add_argument('--exit-rank-pct', type=float, default=0.60,
+                   help='Hysteresis: hold long until rank percentile < this (default 0.60)')
+    p.add_argument('--max-new-names-per-rebalance', type=int, default=None,
+                   help='Hysteresis: cap new long entries per rebalance (default: no cap)')
+    p.add_argument('--turnover-penalty', type=float, default=0.0,
+                   help='Validation: objective = active_IR - penalty * avg_turnover (default 0)')
+    p.add_argument('--group-neutral', action='store_true',
+                   help='Peer-group-neutral long-only construction: equal capital per '
+                        'semiconductor sub-industry, top names within each group')
+    p.add_argument('--group-top-frac', type=float, default=None,
+                   help='Group-neutral: fraction of names selected within each group '
+                        '(default: same as --top-frac)')
     p.add_argument('--compare-momentum-presets', action='store_true',
                    help='Show current ranks across all momentum presets')
     p.add_argument('--no-explain', action='store_true')
@@ -139,6 +167,9 @@ def add_portfolio_params(p: argparse.ArgumentParser) -> None:
                    help='Path to tenk_reader cache JSON')
     p.add_argument('--validate', action='store_true',
                    help='Append lightweight walk-forward OOS summary (compare only)')
+    p.add_argument('--validate-combined', action='store_true',
+                   help='Also walk-forward validate the combined long-only book vs pure XS '
+                        '+ benchmark (active-IR selection). Implies --validate.')
 
 
 def combined_params_from_args(args) -> CombinedParams:
@@ -165,7 +196,33 @@ def panel_params_from_args(args) -> dict:
         'lookback': lookback,
         'skip': skip,
         'momentum_preset': mom_preset,
+        'score_mode': getattr(args, 'score_mode', DEFAULT_SCORE_MODE),
+        'beta_window': getattr(args, 'beta_window', DEFAULT_BETA_WINDOW),
     }
+
+
+def _hysteresis_from_args(args) -> dict:
+    """Bundle hysteresis kwargs from CLI args (empty dict when disabled)."""
+    if not getattr(args, 'use_hysteresis', False):
+        return {}
+    return {
+        'use_hysteresis': True,
+        'entry_rank_pct': float(getattr(args, 'entry_rank_pct', 0.80)),
+        'exit_rank_pct': float(getattr(args, 'exit_rank_pct', 0.60)),
+        'max_new_names_per_rebalance': getattr(args, 'max_new_names_per_rebalance', None),
+    }
+
+
+def _group_neutral_from_args(args, tickers: list[str]) -> dict:
+    """Bundle peer-group-neutral kwargs from CLI args (empty dict when disabled)."""
+    if not getattr(args, 'group_neutral', False):
+        return {}
+    from quant.universes import build_group_map
+    out = {'group_neutral': True, 'group_map': build_group_map(list(tickers))}
+    gtf = getattr(args, 'group_top_frac', None)
+    if gtf is not None:
+        out['group_top_frac'] = float(gtf)
+    return out
 
 
 def mom_params_from_panel(params: dict) -> dict:
@@ -440,6 +497,13 @@ def _print_wf_validation(
     headline_cost: float = DEFAULT_COST,
     headline_cost_bps: float | None = None,
     n_trials: int = DEFAULT_SELECTION_TRIALS,
+    select: str = 'sharpe',
+    score_mode: str = DEFAULT_SCORE_MODE,
+    beta_window: int = DEFAULT_BETA_WINDOW,
+    hysteresis: dict | None = None,
+    turnover_penalty: float = 0.0,
+    group_neutral: dict | None = None,
+    validate_combined: bool = False,
 ) -> dict | None:
     from validate_cross_sectional import (
         ACTIVE_IR_EDGE_MARGIN,
@@ -451,9 +515,12 @@ def _print_wf_validation(
         compare_weighting_validation,
         print_weighting_validation_report,
         print_transaction_cost_sensitivity,
+        report_combined_validation,
         report_panel_validation,
         transaction_cost_sensitivity,
     )
+    hysteresis = hysteresis or {}
+    group_neutral = group_neutral or {}
     print('\n=== Walk-forward validation (same universe / XS rules) ===')
     print('Full fold detail: python3 validate_cross_sectional.py --universe <preset>')
     from quant.data_quality import filter_panel_by_coverage
@@ -491,6 +558,12 @@ def _print_wf_validation(
         book='long_only',
         cost=headline_cost,
         n_trials=n_trials,
+        select=select,
+        score_mode=score_mode,
+        beta_window=beta_window,
+        hysteresis=hysteresis,
+        turnover_penalty=turnover_penalty,
+        group_neutral=group_neutral,
         train=train,
         test=test,
         warmup=validation_warmup,
@@ -508,6 +581,10 @@ def _print_wf_validation(
         cost_bps_levels=sweep_levels,
         selection_cost=headline_cost,
         n_trials=n_trials,
+        score_mode=score_mode,
+        beta_window=beta_window,
+        hysteresis=hysteresis,
+        turnover_penalty=turnover_penalty,
         train=train,
         test=test,
         warmup=validation_warmup,
@@ -528,7 +605,10 @@ def _print_wf_validation(
     print_weighting_validation_report(sizing_validation)
     equal_row = sizing_validation.get('rows', {}).get('equal', {})
     equal_sharpe = equal_row.get('sharpe')
-    if equal_row.get('error') is None and equal_sharpe is not None and abs(equal_sharpe - oos['sharpe']) <= 1e-10:
+    if group_neutral.get('group_neutral'):
+        print('Self-check: SKIPPED - sizing/cost diagnostics use the plain top-k book, '
+              'not the group-neutral book, so OOS Sharpe is not expected to match.')
+    elif equal_row.get('error') is None and equal_sharpe is not None and abs(equal_sharpe - oos['sharpe']) <= 1e-10:
         print('Self-check: OK - equal weighting matches main long-only OOS Sharpe.')
     else:
         print(
@@ -542,7 +622,10 @@ def _print_wf_validation(
         ),
         None,
     )
-    if sweep_row and abs(sweep_row['sharpe'] - oos['sharpe']) <= 1e-6:
+    if group_neutral.get('group_neutral'):
+        print('Self-check: SKIPPED - cost sweep uses the plain top-k book, not the '
+              'group-neutral book.')
+    elif sweep_row and abs(sweep_row['sharpe'] - oos['sharpe']) <= 1e-6:
         print('Self-check: OK - cost sweep headline row matches main long-only OOS Sharpe.')
     else:
         sweep_sharpe = sweep_row.get('sharpe') if sweep_row else None
@@ -550,6 +633,19 @@ def _print_wf_validation(
             'Self-check: WARNING - cost sweep headline row diverges from '
             f"main long-only OOS Sharpe ({sweep_sharpe} vs {oos['sharpe']:.6f})."
         )
+    combined_validation = None
+    if validate_combined and xs_params is not None:
+        combined_validation = report_combined_validation(
+            panel,
+            xs_params,
+            cost=headline_cost,
+            train=train,
+            test=test,
+            warmup=validation_warmup,
+            beta_window=beta_window,
+            select=select if select != 'sharpe' else 'active_ir',
+        )
+
     point_ir = wf.get('information_ratio')
     ci_lower = wf.get('information_ratio_ci_lower')
     ci_gate_case = (
@@ -596,6 +692,7 @@ def _print_wf_validation(
         'validation_param_grid': validation_grid,
         'validation_warmup': validation_warmup,
         'validation_label': validation_label,
+        'combined_validation': combined_validation,
     }
 
 
@@ -1066,7 +1163,11 @@ def cmd_portfolio_compare(args) -> None:
         f'Headline strategy cost: {getattr(args, "cost_bps", DEFAULT_COST * 10_000):.1f} bps round-trip.'
     )
     validation_stats = None
-    if getattr(args, 'validate', False):
+    if (
+        getattr(args, 'validate', False)
+        or getattr(args, 'validate_combined', False)
+        or getattr(args, 'group_neutral', False)
+    ):
         validation_stats = _print_wf_validation(
             panel,
             coverage=coverage,
@@ -1075,6 +1176,13 @@ def cmd_portfolio_compare(args) -> None:
             headline_cost=strategy_cost,
             headline_cost_bps=getattr(args, 'cost_bps', DEFAULT_COST * 10_000),
             n_trials=getattr(args, 'n_trials', DEFAULT_SELECTION_TRIALS),
+            select=getattr(args, 'select', 'sharpe'),
+            score_mode=getattr(args, 'score_mode', DEFAULT_SCORE_MODE),
+            beta_window=getattr(args, 'beta_window', DEFAULT_BETA_WINDOW),
+            hysteresis=_hysteresis_from_args(args),
+            turnover_penalty=getattr(args, 'turnover_penalty', 0.0),
+            group_neutral=_group_neutral_from_args(args, list(panel.columns)),
+            validate_combined=getattr(args, 'validate_combined', False),
         )
     weights = None
     scores = None
@@ -1230,6 +1338,101 @@ def cmd_portfolio_ranks(args) -> None:
         print(model.explain_math(**params))
 
 
+def add_trend_params(p: argparse.ArgumentParser) -> None:
+    p.add_argument('--universe', default=DEFAULT_PRESET,
+                   help='Universe preset name (default: semis)')
+    p.add_argument('--tickers', default=None,
+                   help='Custom comma-separated tickers (overrides --universe)')
+    p.add_argument('--years', type=int, default=10)
+    p.add_argument('--trend-mode', choices=['sma', 'tsmom'], default='sma',
+                   help='Trend signal: price>SMA (sma) or trailing-return>0 (tsmom)')
+    p.add_argument('--trend-windows', default=None,
+                   help='Comma-separated trend windows to search (default 50,100,150,200,250)')
+    p.add_argument('--vol-target', action='store_true',
+                   help='Scale exposure toward a volatility target (de-risk in turbulent regimes)')
+    p.add_argument('--target-vol', type=float, default=0.15,
+                   help='Annualized vol target when --vol-target (default 0.15)')
+    p.add_argument('--vol-window', type=int, default=63,
+                   help='Realized-vol window for vol targeting (default 63)')
+    p.add_argument('--max-leverage', type=float, default=1.0,
+                   help='Max exposure when vol targeting (default 1.0 = no leverage)')
+    p.add_argument('--cost-bps', type=float, default=DEFAULT_COST_BPS,
+                   help='Cost in bps per unit exposure turnover (default 10)')
+    p.add_argument('--cash-rate', type=float, default=0.0,
+                   help='Annual cash/risk-free rate earned when out of the market (default 0)')
+    p.add_argument('--train', type=int, default=504, help='Walk-forward train window (days)')
+    p.add_argument('--test', type=int, default=63, help='Walk-forward test window (days)')
+
+
+def cmd_portfolio_trend(args) -> None:
+    from quant.data_quality import filter_panel_by_coverage
+    from quant.trend_overlay import TREND_WINDOW_GRID, report_trend_overlay_validation
+
+    preset, universe = resolve_universe(args.universe, getattr(args, 'tickers', None))
+    panel = fetch_panel(universe, args.years)
+    coverage = coverage_by_ticker(panel)
+    print_panel_quality(assess_panel_quality(panel))
+    panel, _, dropped = filter_panel_by_coverage(panel, MIN_COVERAGE, coverage=coverage)
+    if len(dropped):
+        print(f'Excluded (coverage < {MIN_COVERAGE:.0%}): {format_coverage(dropped)}')
+    if panel.shape[1] < 2:
+        raise ValueError('Need at least 2 names with adequate coverage to form a basket.')
+    if args.trend_windows:
+        windows = [int(w) for w in args.trend_windows.split(',') if w.strip()]
+    else:
+        windows = list(TREND_WINDOW_GRID)
+    if len(panel) < args.train + args.test:
+        raise ValueError(
+            f'Panel too short for walk-forward ({len(panel)} bars; '
+            f'need train+test = {args.train + args.test}).'
+        )
+    report_trend_overlay_validation(
+        panel,
+        train=args.train,
+        test=args.test,
+        mode=args.trend_mode,
+        windows=windows,
+        use_vol_target=getattr(args, 'vol_target', False),
+        target_vol=args.target_vol,
+        vol_window=args.vol_window,
+        max_leverage=args.max_leverage,
+        cost=_cost_from_bps(getattr(args, 'cost_bps', None)),
+        cash_rate=args.cash_rate,
+    )
+
+
+def cmd_portfolio_filing(args) -> None:
+    from quant.data_quality import filter_panel_by_coverage
+    from quant.filing_factor import (
+        DEFAULT_FILING_ACTION,
+        DEFAULT_FILING_THRESHOLD,
+        report_filing_factor_validation,
+    )
+
+    preset, universe = resolve_portfolio_universe(args)
+    panel = fetch_panel(universe, args.years)
+    coverage = coverage_by_ticker(panel)
+    print_panel_quality(assess_panel_quality(panel))
+    panel, _, dropped = filter_panel_by_coverage(panel, MIN_COVERAGE, coverage=coverage)
+    if len(dropped):
+        print(f'Excluded (coverage < {MIN_COVERAGE:.0%}): {format_coverage(dropped)}')
+    xs_params = panel_params_from_args(args)
+    xs_params['mode'] = 'momentum'
+    validate_momentum_params(xs_params['lookback'], xs_params['skip'], n_days=len(panel))
+    report_filing_factor_validation(
+        panel,
+        xs_params,
+        cache_path=getattr(args, 'tenk_cache', 'tenk_cache.json'),
+        threshold=getattr(args, 'filing_threshold', DEFAULT_FILING_THRESHOLD),
+        action=getattr(args, 'filing_action', DEFAULT_FILING_ACTION),
+        activation_lag=getattr(args, 'filing_activation_lag', 1),
+        cost=_cost_from_bps(getattr(args, 'cost_bps', None)),
+        train=getattr(args, 'train', 504),
+        test=getattr(args, 'test', 63),
+        select='active_ir',
+    )
+
+
 def cmd_stock_momentum_compare(args) -> None:
     ticker = args.ticker.upper()
     hist = fetch_historical_prices(ticker, args.years)
@@ -1327,6 +1530,24 @@ def main() -> None:
     add_portfolio_params(p_port_momcmp)
     p_port_momcmp.set_defaults(signal='momentum')
 
+    p_port_trend = p_port_sub.add_parser(
+        'trend', help='Trend/vol-timing overlay on the basket (risk-adjusted, vs cash)',
+    )
+    add_trend_params(p_port_trend)
+
+    p_port_filing = p_port_sub.add_parser(
+        'filing', help='Point-in-time filing-risk negative filter (data-gated validation)',
+    )
+    add_portfolio_params(p_port_filing)
+    p_port_filing.add_argument('--filing-threshold', type=float, default=-0.30,
+                               help='Flag names with filing change-score <= this (default -0.30)')
+    p_port_filing.add_argument('--filing-action', choices=['exclude', 'half_weight'],
+                               default='exclude', help='Action on flagged names (default exclude)')
+    p_port_filing.add_argument('--filing-activation-lag', type=int, default=1,
+                               help='Trading days after filing date before score goes live (default 1)')
+    p_port_filing.add_argument('--train', type=int, default=504, help='Walk-forward train window')
+    p_port_filing.add_argument('--test', type=int, default=63, help='Walk-forward test window')
+
     p_stock = sub.add_parser('stock', help='Single-stock analysis tools')
     p_stock_sub = p_stock.add_subparsers(dest='stock_cmd', required=True)
     p_stock_momcmp = p_stock_sub.add_parser(
@@ -1389,6 +1610,10 @@ def main() -> None:
             cmd_portfolio_ranks(args)
         elif args.command == 'portfolio' and args.portfolio_cmd == 'momentum-compare':
             cmd_portfolio_momentum_compare(args)
+        elif args.command == 'portfolio' and args.portfolio_cmd == 'trend':
+            cmd_portfolio_trend(args)
+        elif args.command == 'portfolio' and args.portfolio_cmd == 'filing':
+            cmd_portfolio_filing(args)
         elif args.command == 'stock' and args.stock_cmd == 'momentum-compare':
             cmd_stock_momentum_compare(args)
         elif args.command == 'help':

@@ -416,5 +416,279 @@
     "extraction_quality": 1098.1268,
     "section_preview": "Item 1A.                                                                        \u2502 \u2502                                                                                  \u2502 \u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
     "ok": true
+  },
+  "MRVL:2026-05-28": {
+    "source": "quarterly",
+    "comparison_type": "year_over_year",
+    "section_used": "risk_factors",
+    "match_method": "fiscal_period",
+    "change_score": -0.35,
+    "summary": "Risk posture materially strengthened with new AI disruption risks, geopolitical concerns, and higher customer concentration (81% to 82%), partially offset by reframing of product focus from AI/Cloud/5G to Data Center/Communications.",
+    "confidence": 0.82,
+    "non_comparable_reason": null,
+    "prior_filing_date": "2025-05-30",
+    "current_filing_date": "2026-05-28",
+    "form": "10-Q",
+    "prior_form": "10-Q",
+    "current_period": "2026-05-02",
+    "prior_period": "2025-05-03",
+    "model": "claude-haiku-4-5-20251001",
+    "scored_at": "2026-06-28T16:24:28.452399+00:00",
+    "extraction_quality": 1103.22664,
+    "section_preview": "\u2502                                                                                  \u2502 \u2502  Item 1A.                                                                        \u2502 \u2502                             ",
+    "candidate_lengths": {
+      "prior": {
+        "risk_factors": 143990,
+        "mda": 43780
+      },
+      "current": {
+        "risk_factors": 161560,
+        "mda": 47562
+      }
+    },
+    "ok": true
+  },
+  "UMC:2026-04-30": {
+    "source": "annual",
+    "comparison_type": "year_over_year",
+    "section_used": "risk_factors",
+    "match_method": "annual_pair",
+    "change_score": -0.15,
+    "summary": "IP risk disclosure strengthened with more explicit litigation language and cross-license partner change (AVAGO to Broadcom); R&D spending increased to 7.5% of revenue; climate commitments clarified with earlier SBTi approval timeline and net-zero target achievement.",
+    "confidence": 0.72,
+    "non_comparable_reason": null,
+    "prior_filing_date": "2025-04-24",
+    "current_filing_date": "2026-04-30",
+    "form": "20-F",
+    "prior_form": "20-F",
+    "model": "claude-haiku-4-5-20251001",
+    "scored_at": "2026-06-28T17:13:08.503928+00:00",
+    "extraction_quality": 923.26848,
+    "section_preview": "Item 3. Key Information\u2014D. Risk Factors\u2014Risks Relating to Manufacturing\u2014Political, Economic, Regulatory and Legal Risks\u2014Intellectual property disputes could result in lengthy    and costly arbitration",
+    "ok": true
+  },
+  "WDC:2025-08-14": {
+    "source": "annual",
+    "comparison_type": "year_over_year",
+    "section_used": "risk_factors",
+    "match_method": "annual_pair",
+    "change_score": -0.35,
+    "summary": "Risk profile shifted from prospective separation uncertainty to post-separation challenges; new trade policy risk section added; cybersecurity risks expanded to include AI-related threats; separation-related talent retention concerns removed but replaced with post-separation vulnerability concerns.",
+    "confidence": 0.75,
+    "non_comparable_reason": null,
+    "prior_filing_date": "2024-08-20",
+    "current_filing_date": "2025-08-14",
+    "form": "10-K",
+    "prior_form": "10-K",
+    "model": "claude-haiku-4-5-20251001",
+    "scored_at": "2026-06-28T17:15:02.009792+00:00",
+    "extraction_quality": 1081.40424,
+    "section_preview": "Item 1A.                                                                        \u2502 \u2502                                                                                  \u2502 \u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+    "ok": true
+  },
+  "WDC:2026-05-01": {
+    "source": "quarterly",
+    "comparison_type": "year_over_year",
+    "section_used": "mda_both",
+    "match_method": "day_window",
+    "change_score": 0.65,
+    "summary": "Risk posture significantly eased: strong demand recovery, improved margins, debt reduction through Sandisk monetization, and positive AI-driven outlook offset by new business restructuring costs and tariff uncertainty.",
+    "confidence": 0.85,
+    "non_comparable_reason": null,
+    "prior_filing_date": "2025-05-02",
+    "current_filing_date": "2026-05-01",
+    "form": "10-Q",
+    "prior_form": "10-Q",
+    "current_period": "2026-04-03",
+    "prior_period": "2025-03-28",
+    "model": "claude-haiku-4-5-20251001",
+    "scored_at": "2026-06-28T17:31:33.924747+00:00",
+    "extraction_quality": 1175.21476,
+    "section_preview": "\u2502                                                                                  \u2502 \u2502  Item 2.                                                                         \u2502 \u2502                             ",
+    "candidate_lengths": {
+      "prior": {
+        "risk_factors": 5490,
+        "mda": 71886
+      },
+      "current": {
+        "risk_factors": 1174,
+        "mda": 64194
+      }
+    },
+    "ok": true
+  },
+  "JNJ:2026-02-11": {
+    "source": "annual",
+    "comparison_type": "year_over_year",
+    "section_used": "risk_factors",
+    "match_method": "annual_pair",
+    "change_score": -0.15,
+    "summary": "Minor risk increases from reduced manufacturing facilities (64 to 63), simplified tax language, and added 'field actions' terminology in product safety disclosures, partially offset by softened counterfeit language.",
+    "confidence": 0.72,
+    "non_comparable_reason": null,
+    "prior_filing_date": "2025-02-13",
+    "current_filing_date": "2026-02-11",
+    "form": "10-K",
+    "prior_form": "10-K",
+    "model": "claude-haiku-4-5-20251001",
+    "scored_at": "2026-06-28T17:30:59.864741+00:00",
+    "extraction_quality": 1022.23856,
+    "section_preview": "Item 1A. Risk factors                                                           \u2502 \u2502                                                                                  \u2502 \u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+    "ok": true
+  },
+  "JNJ:2026-04-22": {
+    "source": "quarterly",
+    "comparison_type": "year_over_year",
+    "section_used": "mda_both",
+    "match_method": "fiscal_period",
+    "change_score": -0.35,
+    "summary": "Risk posture weakened materially: STELARA biosimilar impact accelerating (5.4% vs 4.7% headwind), SIMPONI biosimilar threat emerging (2H 2026), OPSUMIT generic competition expected (2H 2026), XARELTO share erosion accelerating, Orthopaedics separation announced creating execution risk, while partially offset by strong operational growth in Oncology/Neuroscience and favorable currency tailwinds.",
+    "confidence": 0.78,
+    "non_comparable_reason": null,
+    "prior_filing_date": "2025-04-23",
+    "current_filing_date": "2026-04-22",
+    "form": "10-Q",
+    "prior_form": "10-Q",
+    "current_period": "2026-03-29",
+    "prior_period": "2025-03-30",
+    "model": "claude-haiku-4-5-20251001",
+    "scored_at": "2026-06-28T17:32:36.609993+00:00",
+    "extraction_quality": 1127.54108,
+    "section_preview": "\u2502                                                                                  \u2502 \u2502  Item 2 \u2014 Management\u2019s discussion and analysis of financial condition and        \u2502 \u2502  results of operations      ",
+    "candidate_lengths": {
+      "prior": {
+        "risk_factors": 0,
+        "mda": 60347
+      },
+      "current": {
+        "risk_factors": 0,
+        "mda": 57075
+      }
+    },
+    "ok": true
+  },
+  "COHR:2026-05-06": {
+    "source": "quarterly",
+    "comparison_type": "year_over_year",
+    "section_used": "mda_both",
+    "match_method": "fiscal_period",
+    "change_score": 0.35,
+    "summary": "Risk posture eased materially: strong AI/datacenter demand, $2B NVIDIA investment, business divestitures reducing complexity, restructuring nearing completion, and tariff impacts contained; offset by ongoing geopolitical uncertainty and asset impairments.",
+    "confidence": 0.78,
+    "non_comparable_reason": null,
+    "prior_filing_date": "2025-05-07",
+    "current_filing_date": "2026-05-06",
+    "form": "10-Q",
+    "prior_form": "10-Q",
+    "current_period": "2026-03-31",
+    "prior_period": "2025-03-31",
+    "model": "claude-haiku-4-5-20251001",
+    "scored_at": "2026-06-29T09:49:51.399803+00:00",
+    "extraction_quality": 1214.1104,
+    "section_preview": "\u2502                                                           \u2502 \u2502  Item 2. MANAGEMENT\u2019S DISCUSSION AND ANALYSIS OF          \u2502 \u2502  FINANCIAL CONDITION AND RESULTS OF OPERATIONS            \u2502 \u2502             ",
+    "candidate_lengths": {
+      "prior": {
+        "risk_factors": 16918,
+        "mda": 13930
+      },
+      "current": {
+        "risk_factors": 0,
+        "mda": 56726
+      }
+    },
+    "ok": true
+  },
+  "LLY:2026-04-30": {
+    "source": "quarterly",
+    "comparison_type": "year_over_year",
+    "section_used": "mda_both",
+    "match_method": "fiscal_period",
+    "change_score": -0.62,
+    "summary": "Risk posture materially deteriorated: government pricing agreements finalized with mandatory price cuts, two additional products selected for Medicare price-setting (Trulicity, Verzenio), significant international price pressure (China NRDL listing), customer concentration in incretin medicines intensified to 65% of revenue, and regulatory/reimbursement headwinds explicitly escalated.",
+    "confidence": 0.92,
+    "non_comparable_reason": null,
+    "prior_filing_date": "2025-05-01",
+    "current_filing_date": "2026-04-30",
+    "form": "10-Q",
+    "prior_form": "10-Q",
+    "current_period": "2026-03-31",
+    "prior_period": "2025-03-31",
+    "model": "claude-haiku-4-5-20251001",
+    "scored_at": "2026-06-30T02:22:12.537320+00:00",
+    "extraction_quality": 1340.13828,
+    "section_preview": "\u2502                                                                                  \u2502 \u2502  Item 2. Management's Discussion and Analysis of Results of Operations and       \u2502 \u2502  Financial Condition        ",
+    "candidate_lengths": {
+      "prior": {
+        "risk_factors": 0,
+        "mda": 34203
+      },
+      "current": {
+        "risk_factors": 0,
+        "mda": 34895
+      }
+    },
+    "ok": true
+  },
+  "ABBV:2026-05-08": {
+    "source": "quarterly",
+    "comparison_type": "year_over_year",
+    "section_used": "mda_both",
+    "match_method": "fiscal_period",
+    "change_score": -0.35,
+    "summary": "Risk posture weakened materially: regulatory pressures intensified (price controls on Botox, CRL for TrenibotE, IRA impact), Humira decline accelerated (-40% vs -50% prior but sustained), new manufacturing/capital commitments announced, though revenue growth improved and pipeline advanced.",
+    "confidence": 0.78,
+    "non_comparable_reason": null,
+    "prior_filing_date": "2025-05-09",
+    "current_filing_date": "2026-05-08",
+    "form": "10-Q",
+    "prior_form": "10-Q",
+    "current_period": "2026-03-31",
+    "prior_period": "2025-03-31",
+    "model": "claude-haiku-4-5-20251001",
+    "scored_at": "2026-06-30T02:28:05.702212+00:00",
+    "extraction_quality": 1292.62504,
+    "section_preview": "ITEM 2. MANAGEMENT\u2019S DISCUSSION AND ANALYSIS OF FINANCIAL CONDITION AND RESULTS OF OPERATIONS The following is a discussion and analysis of the financial condition of AbbVie Inc. (AbbVie or the compan",
+    "candidate_lengths": {
+      "prior": {
+        "risk_factors": 0,
+        "mda": 46519
+      },
+      "current": {
+        "risk_factors": 0,
+        "mda": 45224
+      }
+    },
+    "ok": true
+  },
+  "MRK:2026-05-04": {
+    "source": "quarterly",
+    "comparison_type": "year_over_year",
+    "section_used": "mda_both",
+    "match_method": "fiscal_period",
+    "change_score": -0.72,
+    "summary": "Significantly increased risk posture driven by major acquisitions ($16.7B combined), expanded government price controls on key products (Lenvima, expected Keytruda), new MFN pricing agreement constraints, tariff mitigation through manufacturing commitments, and vaccine supply chain pressures persisting despite some oncology growth.",
+    "confidence": 0.92,
+    "non_comparable_reason": null,
+    "prior_filing_date": "2025-05-02",
+    "current_filing_date": "2026-05-04",
+    "form": "10-Q",
+    "prior_form": "10-Q",
+    "current_period": "2026-03-31",
+    "prior_period": "2025-03-31",
+    "model": "claude-haiku-4-5-20251001",
+    "scored_at": "2026-06-30T02:28:51.260532+00:00",
+    "extraction_quality": 1264.3274,
+    "section_preview": "\u2502                                                                                  \u2502 \u2502  Item 2. Management\u2019s Discussion and Analysis of Financial Condition and         \u2502 \u2502  Results of Operations      ",
+    "candidate_lengths": {
+      "prior": {
+        "risk_factors": 0,
+        "mda": 83869
+      },
+      "current": {
+        "risk_factors": 0,
+        "mda": 98324
+      }
+    },
+    "ok": true
   }
 }
